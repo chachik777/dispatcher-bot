@@ -8,6 +8,8 @@ import email
 import logging
 import random
 import os
+import socket
+import time
 from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -16,14 +18,26 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters
 from telegram.error import ChatMigrated, TimedOut, NetworkError, TelegramError
 
-# ---------- НАСТРОЙКА ЛОГИРОВАНИЯ (только в stdout) ----------
+# ---------- ИМПОРТ СПИСКА УЛИЦ ----------
+try:
+    from streets import KNOWN_STREETS
+except ImportError:
+    KNOWN_STREETS = [
+        "50 лет Октября", "50 лет ВЛКСМ", "Московский тракт", "Ялуторовская", "Монтажников",
+        "Новоселов", "Никольского", "Полевая", "Скандинавская", "Западно-Сибирская",
+        "Фабричная", "Беляева", "Дружбы", "Миллираторов", "Моторостроителей",
+        "Республики", "Советская", "Ленина", "Гагарина", "Широтная"
+    ]
+    logging.warning("Файл streets.py не найден, используется базовый список улиц.")
+
+# ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ---------- ДЕКОРАТОР RETRY ----------
+# ---------- ДЕКОРАТОР RETRY (асинхронный) ----------
 def retry(max_retries=5, delay=2, backoff=2, exceptions=(Exception,)):
     def decorator(func):
         @wraps(func)
@@ -43,7 +57,27 @@ def retry(max_retries=5, delay=2, backoff=2, exceptions=(Exception,)):
         return wrapper
     return decorator
 
-# ---------- КОНФИГУРАЦИЯ (через переменные окружения) ----------
+# ---------- ДЕКОРАТОР RETRY (синхронный) ----------
+def retry_sync(max_retries=10, delay=5, backoff=2, exceptions=(Exception,)):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            _delay = delay
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Sync retry failed for {func.__name__}: {e}")
+                        raise
+                    logger.warning(f"Sync retry {attempt+1}/{max_retries} for {func.__name__}: {e}")
+                    time.sleep(_delay + random.uniform(0, 0.5))
+                    _delay *= backoff
+            return None
+        return wrapper
+    return decorator
+
+# ---------- КОНФИГУРАЦИЯ ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8964018097:AAHiQfOwTnwWeVQWUog5vhihmk8lfcDLA74")
 GENERAL_GROUP = int(os.getenv("GENERAL_GROUP", "-1003896694214"))
 
@@ -51,21 +85,45 @@ EMAIL = os.getenv("EMAIL", "dir72.pk@mail.ru")
 PASSWORD = os.getenv("PASSWORD", "afStBLqMmNzQtZNkc0Mv")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
-# Группы можно оставить в коде, либо вынести в переменную, но пока оставим.
 GROUPS = {
     "computers": [
         -1004355591778,   # Даня
+        -1003976268046,   # Александр (перемещён после Дани)
         -1003395683617,   # Витя
         -1004445931308,   # Игорь
-        -1003734200853,   # Денис
-        -1003976268046    # Александр
+        -1003734200853    # Денис
     ],
-    "appliances": [-1003975989333, -1003981596959],
+    "appliances": [
+        -1003975989333,   # Евгений
+        -1003981596959    # Александр Лобанов
+    ],
     "refrigerators": [-1004352137129, -1004382888384],
     "cond": [-1004445931308, -1004486734839, -1004352137129],
     "tv": [-1004445931308],
-    "orgtech": [-1004360815294],
-    "other": [-1003896694214]
+    "orgtech": [-1004360815294],   # Эдик
+    "phone": [-1004355591778],     # Даня
+    "vacuum": [-1003896694214],
+    "microwave": [-1003896694214],
+    "coffee": [-1003896694214],
+    "speaker": [-1003896694214],
+    "console": [-1003896694214],
+    "other": [-1003896694214],
+}
+
+CATEGORY_NAMES = {
+    "computers": "компьютер",
+    "appliances": "крупная бытовая техника",
+    "refrigerators": "холодильник",
+    "cond": "кондиционер",
+    "tv": "телевизор",
+    "orgtech": "оргтехника",
+    "phone": "телефон",
+    "vacuum": "пылесос",
+    "microwave": "микроволновка",
+    "coffee": "кофемашина",
+    "speaker": "колонка",
+    "console": "игровая приставка",
+    "other": "другое"
 }
 
 active_requests = {}
@@ -108,14 +166,159 @@ def extract_body_text(msg):
     return None
 
 def clean_text(text):
-    text = re.sub(r'(?i)\b(здравствуйте|добрый день|добрый вечер|привет)\s*[,.]?\s*', '', text)
-    text = re.sub(r'\b(алло|вас слышно|слышно|да|нет|ага|все верно|спасибо|слышу)\b', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?i)\b(здравствуйте|добрый день|добрый вечер|привет|алло|до свидания|спасибо|пожалуйста)\s*[,.]?\s*', '', text)
+    text = re.sub(r'\b(вас слышно|слышно|да|нет|ага|все верно|слышу)\b', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^(сейчас|ну|так|вот|значит|это|там|тут|прям|как бы)\s+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^[,\s]+', '', text)
     text = re.sub(r'^(по|про|насчет|касательно)\s+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\b(хотел[аи]?\s+бы|хочу|надо|нужно|необходимо|планирую|собираюсь|принести|привезти|отвезти|отремонтировать|починить|исправить)\s+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'[,.\s]+$', '', text)
     return text.strip()
+
+def is_price_question(text):
+    return bool(re.search(r'(цена|стоимость|сколько стоит|рублей|тысяч|руб|тыс|₽|полторы тысячи|от \d+|\d+ рублей|\d+ тыс)', text.lower()))
+
+def is_meaningful_issue(text):
+    text_clean = text.strip()
+    text_clean = text_clean.rstrip('.,!?;:')
+    text_clean = text_clean.strip()
+    if len(text_clean) < 3:
+        return False
+    if text_clean.lower() in ['да', 'нет', 'ага', 'угу', 'ок', 'окей', 'хорошо', 'спасибо', 'до свидания', 'н', 'д',
+                              'привет', 'здравствуйте', 'алло', 'слышно', 'понял', 'поняла', 'ясно', 'так', 'ну',
+                              'вот', 'это', 'там', 'тут', 'прям', 'как бы', 'просто', 'типа', 'конечно', 'ладно',
+                              'добрый день', 'добрый вечер', 'всего хорошего', 'всего доброго']:
+        return False
+    if re.search(r'(во сколько|когда|подъедет|приедет|оформляла|записали|сегодня|завтра|в четверг|верно|ожидаю|жду|все верно|да-да|ага-ага|угу-угу)', text_clean, re.IGNORECASE):
+        return False
+    if re.match(r'^[\s.,!?]+$', text_clean):
+        return False
+    if re.match(r'^[\d\s\-\(\)]+$', text_clean):
+        return False
+    return True
+
+def is_fake_address(text):
+    text_lower = text.lower()
+    fake_keywords = [
+        'ждем вас', 'филиал', 'вход', 'крыльцо', 'этаж', 'поднимитесь', 'подняться',
+        'принимаются', 'выезд не предусмотрен', 'марку', 'помните', 'назовите', 'продиктуйте',
+        'микроволнов', 'принтер', 'ноутбук', 'компьютер', 'телевизор', 'холодильник',
+        'стиральная', 'посудомоечная', 'кофемашина', 'пылесос', 'кондиционер',
+        'мастер перезвонит', 'заявка', 'ремонт', 'диагностика',
+        'автоответчик', 'не понял', 'с кем разговариваю',
+        'год', 'по-моему', 'очередь', 'наверное', 'переехали', 'поставили',
+        'ждем вас в филиале', 'корпус 1 дробь 1', 'зеленое крыльцо', 'со стороны широтной',
+        'целый бок', 'можно', 'привезти', 'хо', 'дисе написано', 'сервис близко',
+        'запишу номер', 'проверьте', 'подскажите', 'мастер приехал', 'выезд мастера', 'сегодня',
+        'номер телефона', 'квартира', 'дом', 'улица',
+        'на 2', 'течение 1', 'во сколько', 'подъедет', 'оформляла заявку', 'в четверг',
+        'широтная 29', 'широтную 29', 'корпус 1', 'во 2', 'микроны во 2', '1 корпус', 'корпус 1 дробь 1',
+        'широтной 29 корпус', 'широтной 29', 'м 225', 'стоит 3', '3 ?',
+        'родной 29', 'каждые 10', 'До 9', 'с 9', 'Тут 2', 'Дубль', 'заречный проезд',
+        'вот, я смотрю', 'сейчас возлесите', 'возлесите', 'лесобаза', 'лесобазе',
+        'газовиков', 'заречная', 'заречном', 'мне ближе', 'пешком', 'типа до свидания',
+        'всего доброго', 'дольше', 'привезу.', 'танца', '50 лет',
+        'плейстейшн', 'плейстайшн', 'плюстшн', 'плюс сейшн', 'playstation', 'ps4', 'ps5'
+    ]
+    for kw in fake_keywords:
+        if kw in text_lower:
+            return True
+    return False
+
+def find_street_in_text(text):
+    text_lower = text.lower()
+    for street in KNOWN_STREETS:
+        if street.lower() in text_lower:
+            return street
+        street_clean = re.sub(r'[ьъ]', '', street.lower())
+        text_clean = re.sub(r'[ьъ]', '', text_lower)
+        if street_clean in text_clean:
+            return street
+    return None
+
+def extract_address_smart(text):
+    text = text.strip()
+    if not text:
+        return None
+
+    def add_extra_parts(base, source_text):
+        result = base
+        korpus_match = re.search(r'корпус\s*(\d+[а-я]?)', source_text, re.IGNORECASE)
+        if korpus_match:
+            result += f", корпус {korpus_match.group(1)}"
+        podezd_match = re.search(r'подъезд\s*(\d+)', source_text, re.IGNORECASE)
+        if podezd_match:
+            result += f", подъезд {podezd_match.group(1)}"
+        etazh_match = re.search(r'этаж\s*(\d+)', source_text, re.IGNORECASE)
+        if etazh_match:
+            result += f", этаж {etazh_match.group(1)}"
+        flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', source_text, re.IGNORECASE)
+        if flat_match:
+            result += f", квартира {flat_match.group(1)}"
+        return result
+
+    street = find_street_in_text(text)
+    if street:
+        pattern = re.compile(r'(?:' + re.escape(street) + r')\s*[,.:]?\s*(\d+[а-я]?)', re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            house = match.group(1)
+            base = f"{street} {house}"
+            return add_extra_parts(base, text)
+        else:
+            pattern2 = re.compile(r'(?:' + re.escape(street) + r')\s*[,.:]?\s*(\d+)', re.IGNORECASE)
+            match2 = pattern2.search(text)
+            if match2:
+                base = f"{street} {match2.group(1)}"
+                return add_extra_parts(base, text)
+
+    if re.search(r'\b(?:улица|ул\.?)\b', text, re.IGNORECASE):
+        m = re.search(r'\b(?:улица|ул\.?)\s*([А-Яа-я\-]+(?:\s+[А-Яа-я\-]+)*)\s*[,.]?\s*(?:дом\s*)?(\d+[а-я]?)?', text, re.IGNORECASE)
+        if m:
+            street_name = m.group(1).strip()
+            house = m.group(2)
+            if house:
+                base = f"{street_name} {house}"
+                return add_extra_parts(base, text)
+            else:
+                return street_name
+
+    patterns_with_street = [
+        r'(?:улица|ул\.?)\s*([А-Яа-я\-]+\s+\d+[а-я]?)',
+        r'([А-Яа-я\-]+\s+\d+[а-я]?)\s*(?:корпус|кв\.?|квартира)',
+        r'([А-Яа-я\-]+\s+\d+[а-я]?)\s*,\s*(?:квартира|кв\.?)\s*\d+',
+        r'(?:дом|корпус)\s*(\d+[а-я]?)',
+    ]
+    for pattern in patterns_with_street:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            part = match.group(0).strip()
+            if re.search(r'\b(playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo)\b', part, re.IGNORECASE):
+                continue
+            if not re.search(r'\b(руб|тыс|цена|стоимость)\b', part, re.IGNORECASE):
+                flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', text, re.IGNORECASE)
+                if flat_match:
+                    part += f", квартира {flat_match.group(1)}"
+                return part
+
+    simple_pattern = re.compile(r'\b([А-Яа-я]+\s+\d+[а-я]?)\b')
+    match = simple_pattern.search(text)
+    if match:
+        part = match.group(0)
+        if re.search(r'\b(playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo)\b', part, re.IGNORECASE):
+            return None
+        if not re.search(r'\b(руб|тыс|цена|стоимость)\b', part, re.IGNORECASE):
+            if not re.search(r'\b(ноутбук|компьютер|принтер|телевизор|кондиционер|холодильник|стиральн|посудомоечн|пылесос|кофемашин|микроволновк|колонка|приставка|телефон|планшет)\b', part, re.IGNORECASE):
+                flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', text, re.IGNORECASE)
+                if flat_match:
+                    part += f", квартира {flat_match.group(1)}"
+                return part
+
+    flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', text, re.IGNORECASE)
+    if flat_match:
+        return f"квартира {flat_match.group(1)}"
+
+    return None
 
 # ---------- ПАРСЕРЫ ПИСЕМ ----------
 def parse_bothelp(body):
@@ -134,13 +337,17 @@ def parse_bothelp(body):
         elif len(digits) == 10 and digits.startswith('9'): digits = '7' + digits
         if len(digits) == 11 and digits.startswith('7'):
             phone = f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
-        else: phone = raw_phone
+        else:
+            phone = raw_phone
+    else:
+        logger.info("BotHelp: номер телефона не найден, заявка будет пропущена")
+        return None
     prob_match = re.search(r'problem:\s*(.+)', body)
     if prob_match: problem = prob_match.group(1).strip()
     return (
         "🛠 Новая заявка (BotHelp)!\n"
         f"👤 Имя: {name}\n📱 Категория: {problem}\n🏷 Марка: {brand}\n📞 Телефон: {phone}\n"
-    )
+    ), None
 
 def parse_craftum(body):
     name = "не указано"
@@ -161,8 +368,13 @@ def parse_craftum(body):
             elif len(digits) == 10 and digits.startswith('9'): digits = '7' + digits
             if len(digits) == 11 and digits.startswith('7'):
                 phone = f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
-            else: phone = digits
-        else: phone = raw_phone
+            else:
+                phone = digits
+        else:
+            phone = raw_phone
+    else:
+        logger.info("Craftum: номер телефона не найден, заявка будет пропущена")
+        return None
     service_match = re.search(r'Какая услуга вас интересует\?\s*\n?\s*([^\n]+)', body)
     if not service_match:
         service_match = re.search(r'Выберите ремонт какой техники Вас интересует\s*\n?\s*([^\n]+)', body)
@@ -172,9 +384,9 @@ def parse_craftum(body):
     return (
         "🛠 Новая заявка (Сайт)!\n"
         f"👤 Имя: {name}\n📱 Услуга: {service}\n📞 Телефон: {phone}\n🌐 Источник: {page}\n"
-    )
+    ), None
 
-# ---------- ПАРСИНГ ZVONOK (КОРРЕКТНЫЙ) ----------
+# ---------- ОСНОВНАЯ ФУНКЦИЯ ПАРСИНГА ZVONOK ----------
 def parse_zvonok(body):
     # ---------- Извлечение телефона ----------
     phone = "не указан"
@@ -213,84 +425,175 @@ def parse_zvonok(body):
             "🛠 Новая заявка (Zvonok)!\n"
             f"📞 Телефон: {phone}\n"
             f"⚠️ Разговор не распознан или прерван\n"
-        )
+        ), "other"
 
     client_lines = re.findall(r"'client'.*?'text':\s*'([^']*)'", body)
     robot_lines = re.findall(r"'robot'.*?'text':\s*'([^']*)'", body)
+
+    if not client_lines and not robot_lines:
+        talk_match = re.search(r'Разговор:\s*(.*?)(?:\n\n|$)', body, re.DOTALL)
+        if talk_match:
+            talk_text = talk_match.group(1)
+            lines = talk_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line.startswith('Робот:'):
+                    robot_lines.append(line.replace('Робот:', '').strip())
+                elif line.startswith('Клиент:'):
+                    client_lines.append(line.replace('Клиент:', '').strip())
+                elif re.match(r'^Робот\s*:', line):
+                    robot_lines.append(re.sub(r'^Робот\s*:', '', line).strip())
+                elif re.match(r'^Клиент\s*:', line):
+                    client_lines.append(re.sub(r'^Клиент\s*:', '', line).strip())
+        if not client_lines and not robot_lines:
+            robot_matches = re.findall(r'Робот\s*:\s*(.*?)(?=\s*(?:Робот|Клиент|$))', body, re.DOTALL)
+            client_matches = re.findall(r'Клиент\s*:\s*(.*?)(?=\s*(?:Робот|Клиент|$))', body, re.DOTALL)
+            robot_lines = [m.strip() for m in robot_matches]
+            client_lines = [m.strip() for m in client_matches]
 
     if not client_lines:
         return (
             "🛠 Новая заявка (Zvonok)!\n"
             f"📞 Телефон: {phone}\n"
             f"⚠️ Не удалось извлечь реплики клиента\n"
-        )
+        ), "other"
 
-    refusal_phrases = re.compile(r'(не ремонтируем|не занимаемся|только целиком|платы мы не ремонтируем)', re.IGNORECASE)
+    # ---------- Проверка отказа ----------
+    refusal_phrases = re.compile(
+        r'(не ремонтируем|не занимаемся|только целиком|платы мы не ремонтируем|'
+        r'не входит|не в наши услуги|слесарными работами|открутить|гайку|'
+        r'не занимаемся такими работами|это не наш профиль|'
+        r'мы не ремонтируем|не входит в нашу специализацию|мы не делаем|'
+        r'к сожалению, не ремонтируем|не обслуживаем|'
+        r'стройкой мы не занимаемся|сейчас мы не занимаемся|'
+        r'настройкой не занимаемся|не сможем помочь|не подскажем|'
+        r'только ремонт|ремонтом занимаемся|не ремонтируем такие|'
+        r'не принимаем такие|не работаем с такими|'
+        r'не чин)'
+    )
     if any(refusal_phrases.search(r) for r in robot_lines):
+        logger.info("Заявка отклонена (отказная фраза робота)")
         return None
 
     warranty_phrases = re.compile(r'(гарантия|гарантийный случай|мастер уже был|по гарантии)', re.IGNORECASE)
     is_warranty = any(warranty_phrases.search(line) for line in client_lines + robot_lines)
 
-    category = "не указано"
+    # ---------- ИНИЦИАЛИЗАЦИЯ ----------
+    category_key = "other"
     brand = "не указано"
     problem = "не указано"
     address = "не указано"
     time = "не указано"
 
-    all_text = ' '.join(client_lines + robot_lines)
+    client_text = ' '.join(client_lines)
+    client_text_lower = client_text.lower()
+    all_text = client_text + ' ' + ' '.join(robot_lines)
     all_text_lower = all_text.lower()
 
-    # Категория
-    if re.search(r'\b(ноутбук|компьютер|моноблок|системный блок|системник)\b', all_text_lower):
-        category = "компьютер"
-    else:
-        tech_keywords = {
-            'холодильник': ['холодильник', 'морозильник', 'морозил'],
-            'стиральная машина': ['стиральн', 'стиралк'],
-            'посудомоечная машина': ['посудомоечн'],
-            'плита': ['плит', 'варочн', 'духов'],
-            'кондиционер': ['кондиционер', 'сплит'],
-            'телевизор': ['телевизор', 'тв', 'плазма'],
-            'оргтехника': ['принтер', 'мфу', 'сканер', 'копир', 'факс', 'плоттер'],
-            'водонагреватель': ['водонагревател', 'бойлер'],
-            'пылесос': ['пылесос'],
-        }
-        for cat, words in tech_keywords.items():
-            if any(w in all_text_lower for w in words):
-                category = cat
-                break
-        if category == "не указано":
-            old_words = ['кондиционер', 'холодильник', 'стиральн', 'посудомоечн', 'плит', 'духов',
-                         'ноутбук', 'компьютер', 'принтер', 'мфу', 'телефон', 'пылесос', 'телевизор',
-                         'варочн', 'морозил', 'системный блок', 'системник', 'вытяжк', 'водонагревател']
-            for w in old_words:
-                if w in all_text_lower:
-                    category = w
-                    break
+    # ---------- 1. ОПРЕДЕЛЕНИЕ КАТЕГОРИИ ----------
+    def detect_category_from_text(text_lower):
+        if re.search(r'(игровая приставка|приставка|playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo|джойстик|геймпад|игровая штаг|игровая)', text_lower):
+            return "console"
+        elif re.search(r'(ноутбук|компьютер|моноблок|системный блок|системник|ноут|комп|монитор)', text_lower):
+            return "computers"
+        elif re.search(r'(принтер|мфу|сканер|копир|оргтехника|лазерджет|мфус|мпф|мфу-сканер|копировальный аппарат)', text_lower):
+            return "orgtech"
+        elif re.search(r'(кондиционер|сплит|сплит-система|чистка кондиционера|заправка кондиционера)', text_lower):
+            return "cond"
+        elif re.search(r'(холодильник|морозильник|морозил)', text_lower):
+            return "refrigerators"
+        elif re.search(r'(стиральн|посудомоечн|плит|духов|варочн|водонагревател(ь)?|духовой шкаф|прокладка|уплотнительн|резинк|манжет)', text_lower):
+            return "appliances"
+        elif re.search(r'(телевизор|тв|плазма|телек)', text_lower):
+            return "tv"
+        elif re.search(r'(телефон|смартфон|айфон|iphone|андроид|мобильник|планшет|электронная книга|онор|honor|технопол|tecno|техно)', text_lower):
+            return "phone"
+        elif re.search(r'(пылесос|робот-пылесос|моющий пылесос)', text_lower):
+            return "vacuum"
+        elif re.search(r'(микроволновк|свч|микроволновая печь)', text_lower):
+            return "microwave"
+        elif re.search(r'(кофемашин|кофеварк|кофе-машин|кофейный аппарат)', text_lower):
+            return "coffee"
+        elif re.search(r'(колонка|умная колонка|алиса|маруся|sberbox|яндекс станция|яндекс колонка)', text_lower):
+            return "speaker"
+        return None
 
-    # Марка
+    category_key = detect_category_from_text(client_text_lower)
+    if category_key is None:
+        category_key = detect_category_from_text(all_text_lower)
+    if category_key is None:
+        category_key = "other"
+
+    # ---------- 2. МАРКА ----------
     brand_aliases = {
         'хаер': 'Haier', 'haier': 'Haier',
+        'хайр': 'Haier',
         'аристон': 'Ariston', 'ariston': 'Ariston',
-        'bosch': 'Bosch', 'samsung': 'Samsung', 'lg': 'LG',
+        'bosch': 'Bosch', 'samsung': 'Samsung', 'lg': 'LG', 'элджи': 'LG', 'элжи': 'LG', 'эл джи': 'LG',
+        'оджи': 'LG', 'олджи': 'LG',
         'indesit': 'Indesit', 'whirlpool': 'Whirlpool', 'electrolux': 'Electrolux',
+        'электролюкс': 'Electrolux',
         'хисенс': 'Hisense', 'hisense': 'Hisense',
-        'beko': 'Beko', 'zanussi': 'Zanussi', 'hotpoint': 'Hotpoint',
+        'beko': 'Beko', 'беко': 'Beko', 'бэко': 'Beko',
+        'zanussi': 'Zanussi', 'hotpoint': 'Hotpoint',
         'siemens': 'Siemens', 'miele': 'Miele', 'gorenje': 'Gorenje',
+        'горение': 'Gorenje',
         'liebherr': 'Liebherr', 'sharp': 'Sharp', 'panasonic': 'Panasonic',
         'toshiba': 'Toshiba', 'hitachi': 'Hitachi', 'mitsubishi': 'Mitsubishi',
+        'мицубиши': 'Mitsubishi', 'митсубиши': 'Mitsubishi', 'не судишийтих': 'Mitsubishi',
         'york': 'York', 'daewoo': 'Daewoo', 'hyundai': 'Hyundai',
+        'хундай': 'Hyundai',
         'vitek': 'Vitek', 'redmond': 'Redmond', 'tefal': 'Tefal',
         'асус': 'Asus', 'asus': 'Asus', 'acer': 'Acer', 'lenovo': 'Lenovo',
-        'hp': 'HP', 'dell': 'Dell'
+        'hp': 'HP', 'эйчпи': 'HP', 'хп': 'HP', 'dell': 'Dell',
+        'хонор': 'Honor', 'honor': 'Honor', 'онор': 'Honor',
+        'аско': 'Asko', 'asko': 'Asko',
+        'индезит': 'Indesit', 'индивид': 'Indesit',
+        'макбук': 'MacBook', 'macbook': 'MacBook',
+        'люкс': 'Lux', 'lux': 'Lux',
+        'пропус': 'Prolux', 'prolux': 'Prolux',
+        'эпсон': 'Epson', 'epson': 'Epson',
+        'грюндик': 'Grundig', 'grundig': 'Grundig', 'грандиг': 'Grundig',
+        'асустуф': 'Asus TUF', 'асус туф': 'Asus TUF',
+        'тошиба': 'Toshiba', 'тощи': 'Toshiba',
+        'дриме': 'Dreame', 'dreame': 'Dreame',
+        'декст': 'Daikin', 'daikin': 'Daikin',
+        'заной': 'Zanussi', 'zanussi': 'Zanussi',
+        'катана': 'MSI Katana', 'msi': 'MSI',
+        'сиоми': 'Xiaomi', 'xiaomi': 'Xiaomi',
+        'бирюса': 'Biryusa', 'biryusa': 'Biryusa',
+        'кенди': 'Candy', 'candy': 'Candy',
+        'асины': 'Asus',
+        'лазерджет': 'HP LaserJet', 'лазарджет': 'HP LaserJet',
+        'дольше': "De'Longhi", 'делонги': "De'Longhi",
+        'самсун': 'Samsung', 'хун': 'Hyundai',
+        'танца': 'Toshiba',
+        'днс': 'DNS', 'dns': 'DNS',
+        'технопол': 'Tecno', 'tecno': 'Tecno', 'техно': 'Tecno',
+        'киви': 'KIVI', 'kivi': 'KIVI',
+        'бош': 'Bosch',
+        'плейстейшн': 'PlayStation', 'плейстайшн': 'PlayStation',
+        'плюстшн': 'PlayStation', 'плюс сейшн': 'PlayStation',
+        'playstation': 'PlayStation', 'ps4': 'PlayStation 4', 'ps5': 'PlayStation 5',
+        'xbox': 'Xbox', 'nintendo': 'Nintendo',
     }
 
     found_brand = None
-    for alias, canonical in brand_aliases.items():
-        if alias in all_text_lower:
-            found_brand = canonical
+    for line in client_lines:
+        line_lower = line.lower()
+        for alias, canonical in brand_aliases.items():
+            if alias in line_lower:
+                found_brand = canonical
+                break
+        if found_brand:
             break
+
+    client_says_unknown_brand = re.search(r'(самостоятельно собранн|самодельн|не помню|не знаю|марку не помню|марку не знаю|свой сбор)', client_text_lower)
+    if not found_brand and not client_says_unknown_brand:
+        for alias, canonical in brand_aliases.items():
+            if alias in all_text_lower:
+                found_brand = canonical
+                break
 
     if found_brand:
         brand = found_brand
@@ -305,14 +608,17 @@ def parse_zvonok(body):
             'smeg', 'de\'longhi', 'gorenje', 'liebherr', 'kaiser', 'miele', 'ariete',
             'clatronic', 'exq', 'gaggia', 'saeco', 'krups', 'nespresso', 'dolce gusto',
             'bork', 'kiv', 'midea', 'hisense', 'хисенс', 'hyundai', 'daewoo', 'rowenta',
-            'grundig', 'loewe', 'bang & olufsen', 'аристон', 'ariston', 'hotpoint', 'саратов'
+            'grundig', 'loewe', 'bang & olufsen', 'аристон', 'ariston', 'hotpoint', 'саратов',
+            'honor', 'онор', 'tecno', 'технопол', 'техно', 'kivi', 'киви', 'бош', 'элджи', 'элжи', 'эл джи',
+            'оджи', 'олджи', 'беко', 'бэко'
         ]
-        text_for_brand = all_text_lower
-        if category != "не указано":
-            for word in category.split():
+        text_for_brand = client_text_lower if client_text_lower.strip() else all_text_lower
+        if category_key != "other":
+            for word in CATEGORY_NAMES.get(category_key, '').split():
                 if len(word) > 2:
                     text_for_brand = re.sub(r'\b' + re.escape(word) + r'\b', '', text_for_brand)
-        text_for_brand = re.sub(r'\b(ремонт|заявка|машина|холодильник|плита|телевизор|кондиционер|ноутбук|компьютер|принтер)\b', '', text_for_brand)
+        text_for_brand = re.sub(r'\b(ремонт|заявка|машина|холодильник|плита|телевизор|кондиционер|ноутбук|компьютер|принтер|неисправность|поломка|сломался|сломалась|не работает|не включается|шумит|течёт|морозит|холодит|греет|отжимает|сливает|крутит|сушит|вращается|держится|охлаждает)\b', '', text_for_brand)
+
         for b in known_brands:
             if b in text_for_brand:
                 if b.lower() in brand_aliases:
@@ -321,101 +627,89 @@ def parse_zvonok(body):
                     brand = b
                 break
 
-    if brand == "не указано":
-        for line in client_lines:
-            words = re.findall(r'\b[А-Яа-яA-Za-z]{2,10}\b', line)
-            for w in words:
-                if len(w) >= 2 and not w.lower() in ['это', 'мой', 'улица', 'дом', 'кп', 'снт', 'частный', 'вас', 'все']:
-                    brand = w
-                    break
-            if brand != "не указано":
-                break
-
-    # Неисправность
+    # ---------- 3. НЕИСПРАВНОСТЬ ----------
+    # Слово "ремонт" намеренно отсутствует, чтобы реплики робота не попадали сюда
     problem_pattern = re.compile(
         r'(не запускается|не работает|не включается|не греет|не холодит|не морозит|сломалась|сломался|неисправность|'
         r'моргает|шумит|течёт|не держит|не охлаждает|не реагирует|не открывается|не закрывается|не крутит|не сливает|'
         r'не нагревает|не показывает|нет изображения|нет звука|не заряжается|не печатает|залипает|глючит|зависает|'
         r'выдаёт ошибку|горит индикатор|мигает индикатор|проблема|поломка|сбой|не отжимает|не выключается|не включается|'
         r'не морозит|не холодит|плохо холодит|плохо морозит|течёт вода|вода не греется|вода не сливается|'
-        r'не сушит|не вращается|не держит температуру|черный экран|цветные полоски|полосы на экране)',
+        r'не сушит|не вращается|не держит температуру|черный экран|цветные полоски|полосы на экране|'
+        r'перелив|не дает пену|нет пены|пена не образуется|замена экрана|разбит экран|треснул экран|'
+        r'прошивка|переустановка|переустановить|перешить|настроить|компрессор|не охлаждает|не морозит|не холодит|'
+        r'не захватывает|захватывает бумагу|не подает бумагу|зажевывает бумагу|не печатает|полосы при печати|'
+        r'модуль|почистить|чистка|замена стика|замена подшипника|замена клавиатуры|протечка|слабо охлаждает|'
+        r'перегорела|не работает кнопка|не реагирует|не видит сеть|не ходит|не капает|нет холода|печатает|'
+        r'не подаёт воду|не подает воду|нет воды|не моет|экран не показывает|заправка|чистка|не холодит|'
+        r'провод|блок питания|оторвался|питание|провод от блока питания|оторвался провод|не работает компьютер|'
+        r'проблемы с блоком питания|не включается компьютер|сломался телевизор|не работает телевизор|'
+        r'холодильник не работает|не морозит холодильник|шумит компьютер|вентилятор|подшипник|'
+        r'барабан|прокладка|резинка|уплотнитель|он не включается|не включается|сломалась игровая|'
+        r'ошибка|картридж|плохо печатает|цветная печать|плохо печатает цветным|печатает полосами|'
+        r'разъем|сетевой кабель|входное отверстие|антенное гнездо|не закрывается|не держит заряд|'
+        r'перегорел|не выводится изображение|изображение пропало|звук есть|нет изображения|'
+        r'обновлен|обновление|обновляется|потух|погас|потух экран|экран потух|починил|починить|чинил|чинить|'
+        r'заряжа|перестал(а|о|и)?\s+(работать|заряжаться|включаться|греть|морозить|охлаждать|заряжать)|'
+        r'дверь|открывается|сама открывается|перестала держать|дверь перестала)',
         re.IGNORECASE
     )
-    full_client_text = ' '.join(client_lines)
-    if brand != "не указано":
-        full_client_text = re.sub(re.escape(brand), '', full_client_text, flags=re.IGNORECASE)
-    if category != "не указано":
-        full_client_text = re.sub(re.escape(category), '', full_client_text, flags=re.IGNORECASE)
 
-    match = problem_pattern.search(full_client_text)
-    if not match:
-        match = problem_pattern.search(all_text)
+    problem_candidates = []
+    for line in client_lines:
+        line_clean = line.replace('?', ' ')
+        if is_price_question(line_clean):
+            continue
+        if not is_meaningful_issue(line_clean):
+            continue
+        cleaned = re.sub(r'\b(вот так вот|по зачем|конечно|просто|типа|так|ну|это|там|тут|прям|как бы|значит)\b', '', line_clean, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        if cleaned and problem_pattern.search(cleaned):
+            problem_candidates.append(cleaned)
 
-    if match:
-        start = match.start()
-        end_match = re.search(r'[.,!?]', all_text[start+len(match.group()):])
-        if end_match:
-            end = start + len(match.group()) + end_match.start()
+    final_problem = None
+    if problem_candidates:
+        # Берём первую строку с конкретным признаком поломки
+        for line in problem_candidates:
+            if problem_pattern.search(line):
+                final_problem = line
+                break
+    else:
+        # Ищем в репликах робота, но только конкретные признаки
+        for line in robot_lines:
+            line_clean = line.replace('?', ' ')
+            if problem_pattern.search(line_clean):
+                final_problem = line_clean
+                break
+
+    # ---------- 4. АДРЕС ----------
+    full_client_text = client_text
+    full_client_text = re.sub(r'\b(здравствуйте|алло|до свидания|спасибо|пожалуйста|да|нет|ага|угу|ок|хорошо|всего доброго)\b', '', full_client_text, flags=re.IGNORECASE)
+    full_client_text = re.sub(r'\s+', ' ', full_client_text).strip()
+
+    extracted_addr = extract_address_smart(full_client_text)
+
+    if extracted_addr:
+        address = extracted_addr
+    else:
+        if re.search(r'(ждем вас|принимаем только в филиале|филиал|находимся на|ждем вас на|привозите к нам|в филиал)', all_text_lower):
+            address = "филиал (привоз)"
         else:
-            end = min(start + 100, len(all_text))
-        problem = all_text[start:end].strip()
+            address = "не указано"
+
+    if not final_problem and address == "не указано":
+        logger.info("Нет ни проблемы, ни адреса – заявка отклонена")
+        return None
+
+    if final_problem:
+        problem = final_problem
+        problem = problem.strip()
         if len(problem) > 120:
             problem = problem[:120] + '...'
     else:
-        for line in client_lines:
-            line_clean = clean_text(line)
-            if (line_clean and len(line_clean.split()) >= 2 and
-                not re.search(r'(улица|ул\.?|дом|кв\.?|\d{7,}|здравствуйте|привет|добрый|спасибо|алло|да|нет)', line_clean, re.IGNORECASE)):
-                problem = line_clean
-                break
-        if problem == "не указано":
-            problem = "не указана"
+        problem = "не указана"
 
-    # Адрес
-    address_parts = []
-    address_keywords = r'(улица|ул\.?|проезд|бульвар|переулок|шоссе|проспект|пр-т|тракт|дом|корпус|квартира|кв\.?|деревня|поселок|село|станция|микрорайон|мкр\.?|набережная|площадь|кп\s|снт\s|днп\s|частный дом|коттедж)'
-    for line in client_lines:
-        if re.search(address_keywords, line, re.IGNORECASE):
-            clean_line = re.sub(r'[.,\s]+$', '', line.strip())
-            address_parts.append(clean_line)
-
-    if not address_parts:
-        for line in reversed(robot_lines):
-            if re.search(r'(адрес|улица|дом|кв\.?|кп|снт)', line, re.IGNORECASE):
-                addr_match = re.search(r'(?:адрес\s*[:;]?\s*)(.+?)(?:[.,!?]|$)', line, re.IGNORECASE)
-                if addr_match:
-                    clean_addr = addr_match.group(1).strip()
-                    address_parts.append(clean_addr)
-                    break
-
-    if address_parts:
-        unique = []
-        for p in address_parts:
-            if p not in unique:
-                unique.append(p)
-        address_parts = unique
-
-        has_house = any(re.search(r'дом\s*номер\s*\d+', p, re.IGNORECASE) for p in address_parts)
-        if has_house:
-            filtered = []
-            for p in address_parts:
-                if re.search(r'улица\s*(?:тоже\s*)?(?:номер|№)', p, re.IGNORECASE):
-                    continue
-                filtered.append(p)
-            address_parts = filtered
-
-        address_parts = [re.sub(r'\bастный\b', 'частный', p, flags=re.IGNORECASE) for p in address_parts]
-
-        full_address = ' '.join(address_parts)
-        full_address = re.sub(r'(дом\s*номер\s*\d+)\s*\1', r'\1', full_address, flags=re.IGNORECASE)
-        full_address = re.sub(r'[.,]\s*[.,]', ',', full_address)
-        full_address = re.sub(r'\s+', ' ', full_address).strip()
-        full_address = re.sub(r'\.$', '', full_address)
-        full_address = re.sub(r'\bдом\s*номер\s*(\d+)\b', r'дом \1', full_address, flags=re.IGNORECASE)
-        full_address = re.sub(r'\bкп\s*', 'КП ', full_address, flags=re.IGNORECASE)
-        address = full_address
-
-    # Время
+    # ---------- 5. ВРЕМЯ ----------
     time = "не указано"
     time_patterns = [
         r'(с\s*(\d{1,2})\s*(?:до|по)\s*(\d{1,2})\s*(?:часов?|ч\.?))',
@@ -446,28 +740,46 @@ def parse_zvonok(body):
                 if time != "не указано":
                     break
 
+    category_display = CATEGORY_NAMES.get(category_key, "другое")
     message = (
         "🛠 Новая заявка (Zvonok)!\n"
         + ("⚠️ Гарантийный случай\n" if is_warranty else "") +
-        f"📱 Категория: {category}\n"
+        f"📱 Категория: {category_display}\n"
         f"🏷 Марка: {brand}\n"
         f"⚙️ Неисправность: {problem}\n"
         f"📍 Адрес: {address}\n"
         f"📞 Телефон: {phone}\n"
         f"🕒 Время: {time}\n"
     )
-    return message
+    return message, category_key
 
-# ---------- ЛОГИКА ДИСПЕТЧЕРА ----------
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ ----------
 def detect_category(text: str) -> str:
     t = text.lower()
-    if any(w in t for w in ["виндовс", "установить"]): return "computers"
-    if any(w in t for w in ["принтер", "мфу", "сканер", "копир", "факс", "плоттер"]): return "orgtech"
-    if any(w in t for w in ["ноутбук", "компьютер", "моноблок", "системный блок"]): return "computers"
-    if "холодильник" in t or "морозильник" in t: return "refrigerators"
-    if any(w in t for w in ["стиральн", "посудомоечн", "плит", "духов", "варочн", "водонагревател"]): return "appliances"
-    if "кондиционер" in t: return "cond"
-    if "телевизор" in t: return "tv"
+    if any(w in t for w in ["виндовс", "установить", "ноутбук", "компьютер", "моноблок", "системный блок", "монитор"]):
+        return "computers"
+    if any(w in t for w in ["принтер", "мфу", "сканер", "копир", "факс", "плоттер", "оргтехника", "лазерджет", "мфус"]):
+        return "orgtech"
+    if "кондиционер" in t or "сплит" in t or "чистка кондиционера" in t:
+        return "cond"
+    if "холодильник" in t or "морозильник" in t:
+        return "refrigerators"
+    if any(w in t for w in ["стиральн", "посудомоечн", "плит", "духов", "варочн", "водонагревател", "духовой шкаф", "прокладка", "резинка", "манжет"]):
+        return "appliances"
+    if "телевизор" in t or "тв" in t:
+        return "tv"
+    if any(w in t for w in ["телефон", "планшет", "смартфон", "айфон", "iphone", "андроид", "мобильник", "онор", "honor", "технопол", "tecno", "техно"]):
+        return "phone"
+    if any(w in t for w in ["пылесос", "робот-пылесос"]):
+        return "vacuum"
+    if any(w in t for w in ["микроволновк", "свч"]):
+        return "microwave"
+    if any(w in t for w in ["кофемашин", "кофеварк"]):
+        return "coffee"
+    if any(w in t for w in ["колонка", "алиса", "маруся", "sberbox", "яндекс станция"]):
+        return "speaker"
+    if any(w in t for w in ["приставка", "xbox", "playstation", "плейстейшн", "плейстайшн", "плюстшн", "плюс сейшн", "ps4", "ps5", "nintendo", "джойстик", "геймпад", "игровая"]):
+        return "console"
     return "other"
 
 def get_timeout(category: str) -> int:
@@ -593,15 +905,18 @@ async def handle_callback(update, context):
             task = asyncio.create_task(start_timer(message_id))
             req["timer"] = task
 
-async def dispatch_request(text):
+async def dispatch_request(text, category_key=None):
     if "🛠 Новая заявка" not in text: return
-    text = re.sub(r'^@\w+\s*', '', text)
-    category = detect_category(text)
-    if category == "orgtech":
+    if category_key is None:
+        text_for_cat = re.sub(r'\n?📞 Телефон:.*$', '', text, flags=re.MULTILINE)
+        text_for_cat = re.sub(r'\n?Телефон:.*$', '', text_for_cat, flags=re.MULTILINE)
+        text_for_cat = re.sub(r'\n?Номер телефона:.*$', '', text_for_cat, flags=re.MULTILINE)
+        category_key = detect_category(text_for_cat)
+    if category_key == "orgtech":
         org_group = GROUPS["orgtech"][0]
         await bot.send_message(chat_id=org_group, text=text)
         return
-    groups = GROUPS.get(category, GROUPS["other"])
+    groups = GROUPS.get(category_key, GROUPS["other"])
     message_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     task = asyncio.create_task(start_timer(message_id))
     active_requests[message_id] = {
@@ -609,21 +924,28 @@ async def dispatch_request(text):
         "current_group_index": 0,
         "groups": groups,
         "timer": task,
-        "category": category
+        "category": category_key
     }
     await send_request_with_buttons(groups[0], text, message_id)
 
-async def send_and_dispatch(text):
+async def send_and_dispatch(text, category_key=None):
     logger.info("send_and_dispatch вызван")
+    if "⚠️" in text:
+        try:
+            await bot.send_message(chat_id=GENERAL_GROUP, text=text)
+            logger.info("сообщение об ошибке отправлено в общую группу")
+        except Exception as e:
+            logger.error(f"отправка ошибки в общую группу не удалась: {e}")
+        return
     try:
         await bot.send_message(chat_id=GENERAL_GROUP, text=text)
         logger.info("сообщение в общую группу отправлено успешно")
     except Exception as e:
         logger.error(f"отправка в общую группу не удалась: {e}")
         return
-    await dispatch_request(text)
+    await dispatch_request(text, category_key)
 
-# ---------- ПРОВЕРКА ПОЧТЫ (С ТАЙМАУТАМИ) ----------
+# ---------- ПРОВЕРКА ПОЧТЫ ----------
 EXCLUDED_TECH = [
     'вытяжка', 'вытяжки', 'вытяжкой', 'фен', 'фена', 'феном', 'утюг', 'утюга', 'утюгом',
     'плойка', 'плойки', 'плойкой', 'мультиварка', 'мультиварки', 'мультиваркой',
@@ -641,12 +963,18 @@ EXCLUDED_TECH = [
     'газовый котел', 'водонагреватель', 'теплый пол', 'домофон', 'система видеонаблюдения', 'автомагнитола'
 ]
 
+@retry_sync(max_retries=10, delay=5, backoff=2, exceptions=(socket.gaierror, socket.timeout, ConnectionError))
+def _connect_to_imap(server, email, password):
+    socket.setdefaulttimeout(15)
+    mail = imaplib.IMAP4_SSL(server)
+    mail.login(email, password)
+    mail.select("inbox")
+    return mail
+
 def _imap_task():
     mail = None
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-        mail.login(EMAIL, PASSWORD)
-        mail.select("inbox")
+        mail = _connect_to_imap(IMAP_SERVER, EMAIL, PASSWORD)
         status, data = mail.search(None, 'UNSEEN')
         if status == "OK":
             for num in data[0].split():
@@ -662,14 +990,25 @@ def _imap_task():
                                 body = re.sub(r'Отправлено из мобильной Почты Mail.*?-------- Пересылаемое сообщение --------', '', body, flags=re.DOTALL).strip()
                                 is_zvonok = ("zvonok.com" in sender.lower() or "zvonok.com" in body.lower() or ("phone:" in body and "call_id:" in body))
                                 if is_zvonok:
-                                    final_text = parse_zvonok(body)
-                                    if final_text is None: continue
+                                    parsed = parse_zvonok(body)
+                                    if parsed is None:
+                                        continue
+                                    final_text, category_key = parsed
                                 elif "bothelp.io" in sender.lower() or "bothelp.io" in body.lower():
-                                    final_text = parse_bothelp(body)
+                                    parsed = parse_bothelp(body)
+                                    if parsed is None:
+                                        logger.info("Заявка BotHelp без телефона, пропускаем")
+                                        continue
+                                    final_text, category_key = parsed
                                 elif "craftum.org" in sender.lower() or "craftum.org" in body.lower():
-                                    final_text = parse_craftum(body)
+                                    parsed = parse_craftum(body)
+                                    if parsed is None:
+                                        logger.info("Заявка Craftum без телефона, пропускаем")
+                                        continue
+                                    final_text, category_key = parsed
                                 else:
-                                    final_text = f"📩 Письмо от {sender}\n📌 Тема: {subject}\n\n{body}"
+                                    logger.info(f"Письмо от {sender} не относится к Zvonok/BotHelp/Craftum, пропускаем")
+                                    continue
                                 logger.info(f"DEBUG: final_text = {final_text[:150]}")
                                 if any(term in final_text.lower() for term in EXCLUDED_TECH):
                                     logger.info("заявка отклонена (исключённая техника)")
@@ -688,12 +1027,11 @@ def _imap_task():
                                         recent_phones[digits] = now
                                 logger.info("вызываю asyncio.run_coroutine_threadsafe...")
                                 try:
-                                    asyncio.run_coroutine_threadsafe(send_and_dispatch(final_text), main_loop)
+                                    asyncio.run_coroutine_threadsafe(send_and_dispatch(final_text, category_key), main_loop)
                                 except Exception as e:
                                     logger.error(f"run_coroutine_threadsafe: {e}")
                             else:
-                                final_text = f"📩 Письмо от {sender}\n📌 Тема: {subject}\n⚠️ Текст не найден."
-                                asyncio.run_coroutine_threadsafe(send_and_dispatch(final_text), main_loop)
+                                logger.info("Письмо без тела, пропускаем")
                     mail.store(num, '+FLAGS', '\\Seen')
                 except Exception as e:
                     logger.error(f"Ошибка обработки письма {num}: {e}")
@@ -709,11 +1047,11 @@ def _imap_task():
 
 async def check_mail_async():
     try:
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(90):
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _imap_task)
     except asyncio.TimeoutError:
-        logger.error("check_mail_async timeout (>30 sec)")
+        logger.error("check_mail_async timeout (>90 sec)")
     except Exception as e:
         logger.error(f"check_mail_async error: {e}", exc_info=True)
 
@@ -723,19 +1061,19 @@ async def poll_mail():
             await check_mail_async()
         except Exception as e:
             logger.critical(f"poll_mail crashed: {e}", exc_info=True)
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
         else:
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
 
 # ---------- ЗАПУСК БОТА ----------
 bot = Bot(token=BOT_TOKEN)
-application = Application.builder().token(BOT_TOKEN).build()
+application = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_message))
 application.add_handler(CallbackQueryHandler(handle_callback))
 
 async def main():
     global main_loop
-    main_loop = asyncio.get_event_loop()
+    main_loop = asyncio.get_running_loop()
     await application.initialize()
     await application.start()
     asyncio.create_task(poll_mail())
