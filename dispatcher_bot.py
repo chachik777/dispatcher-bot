@@ -27,7 +27,7 @@ except ImportError:
         "Новоселов", "Никольского", "Полевая", "Скандинавская", "Западно-Сибирская",
         "Фабричная", "Беляева", "Дружбы", "Миллираторов", "Моторостроителей",
         "Республики", "Советская", "Ленина", "Гагарина", "Широтная",
-        "Сидора Путилова", "Путилова", "Сидорова"  # добавлены новые улицы
+        "Сидора Путилова", "Путилова", "Сидорова"
     ]
     logging.warning("Файл streets.py не найден, используется базовый список улиц.")
 
@@ -657,7 +657,7 @@ def parse_zvonok(body):
         r'обновлен|обновление|обновляется|потух|погас|потух экран|экран потух|починил|починить|чинил|чинить|'
         r'заряжа|перестал(а|о|и)?\s+(работать|заряжаться|включаться|греть|морозить|охлаждать|заряжать)|'
         r'дверь|открывается|сама открывается|перестала держать|дверь перестала|'
-        r'установк[аи]|установить|windows|виндовс|драйвер|программ)',  # добавлены ПО
+        r'установк[аи]|установить|windows|виндовс|драйвер|программ)',
         re.IGNORECASE
     )
 
@@ -912,16 +912,30 @@ async def handle_callback(update, context):
             req["timer"] = task
 
 async def dispatch_request(text, category_key=None):
-    if "🛠 Новая заявка" not in text: return
+    if "🛠 Новая заявка" not in text:
+        return
+
     if category_key is None:
         text_for_cat = re.sub(r'\n?📞 Телефон:.*$', '', text, flags=re.MULTILINE)
         text_for_cat = re.sub(r'\n?Телефон:.*$', '', text_for_cat, flags=re.MULTILINE)
         text_for_cat = re.sub(r'\n?Номер телефона:.*$', '', text_for_cat, flags=re.MULTILINE)
         category_key = detect_category(text_for_cat)
+
     if category_key == "orgtech":
         org_group = GROUPS["orgtech"][0]
-        await bot.send_message(chat_id=org_group, text=text)
+        try:
+            await bot.send_message(chat_id=org_group, text=text)
+            logger.info(f"Заявка отправлена в группу оргтехники: {org_group}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить заявку в группу оргтехники ({org_group}): {e}")
+            # fallback: отправляем в общую группу
+            try:
+                await bot.send_message(chat_id=GENERAL_GROUP, text=text)
+                logger.info("Заявка отправлена в общую группу (fallback для оргтехники).")
+            except Exception as e2:
+                logger.error(f"Не удалось отправить заявку даже в общую группу: {e2}")
         return
+
     groups = GROUPS.get(category_key, GROUPS["other"])
     message_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     task = asyncio.create_task(start_timer(message_id))
