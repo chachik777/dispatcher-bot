@@ -657,7 +657,8 @@ def parse_zvonok(body):
         r'обновлен|обновление|обновляется|потух|погас|потух экран|экран потух|починил|починить|чинил|чинить|'
         r'заряжа|перестал(а|о|и)?\s+(работать|заряжаться|включаться|греть|морозить|охлаждать|заряжать)|'
         r'дверь|открывается|сама открывается|перестала держать|дверь перестала|'
-        r'установк[аи]|установить|windows|виндовс|драйвер|программ)',
+        r'установк[аи]|установить|windows|виндовс|драйвер|программ|'
+        r'замена стекла)',  # добавлена замена стекла
         re.IGNORECASE
     )
 
@@ -679,13 +680,6 @@ def parse_zvonok(body):
         for line in problem_candidates:
             if problem_pattern.search(line):
                 final_problem = line
-                break
-    else:
-        # Ищем в репликах робота, но только конкретные признаки
-        for line in robot_lines:
-            line_clean = line.replace('?', ' ')
-            if problem_pattern.search(line_clean):
-                final_problem = line_clean
                 break
 
     # ---------- 4. АДРЕС ----------
@@ -928,7 +922,6 @@ async def dispatch_request(text, category_key=None):
             logger.info(f"Заявка отправлена в группу оргтехники: {org_group}")
         except Exception as e:
             logger.error(f"Не удалось отправить заявку в группу оргтехники ({org_group}): {e}")
-            # fallback: отправляем в общую группу
             try:
                 await bot.send_message(chat_id=GENERAL_GROUP, text=text)
                 logger.info("Заявка отправлена в общую группу (fallback для оргтехники).")
