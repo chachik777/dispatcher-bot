@@ -1,4 +1,3 @@
-```p
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -1094,4 +1093,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=True)
-```
