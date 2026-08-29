@@ -509,7 +509,7 @@ def parse_zvonok(body):
             return "refrigerators"
         elif re.search(r'(стиральн|посудомоечн|плит|духов|варочн|водонагревател(ь)?|духовой шкаф|прокладка|уплотнительн|резинк|манжет)', text_lower):
             return "appliances"
-        elif re.search(r'(телевизор|тв|плазма|телек)', text_lower):
+        elif re.search(r'(телевизор|(?<![\w])тв(?![\w])|плазма|телек)', text_lower):  # границы для "тв"
             return "tv"
         elif re.search(r'(телефон|смартфон|айфон|iphone|андроид|мобильник|планшет|электронная книга|онор|honor|технопол|tecno|техно)', text_lower):
             return "phone"
@@ -697,6 +697,11 @@ def parse_zvonok(body):
         else:
             address = "не указано"
 
+    # Если техника филиальная и клиент назвал адрес Широтной, заменяем на "филиал (привоз)"
+    filial_categories = ["vacuum", "microwave", "coffee", "phone", "speaker", "console"]
+    if category_key in filial_categories and address != "не указано" and "широтная" in address.lower():
+        address = "филиал (привоз)"
+
     if not final_problem and address == "не указано":
         logger.info("Нет ни проблемы, ни адреса – заявка отклонена")
         return None
@@ -766,7 +771,7 @@ def detect_category(text: str) -> str:
         return "refrigerators"
     if any(w in t for w in ["стиральн", "посудомоечн", "плит", "духов", "варочн", "водонагревател", "духовой шкаф", "прокладка", "резинка", "манжет"]):
         return "appliances"
-    if "телевизор" in t or "тв" in t:
+    if re.search(r'(телевизор|(?<![\w])тв(?![\w])|плазма|телек)', t):  # границы для "тв"
         return "tv"
     if any(w in t for w in ["телефон", "планшет", "смартфон", "айфон", "iphone", "андроид", "мобильник", "онор", "honor", "технопол", "tecno", "техно"]):
         return "phone"
