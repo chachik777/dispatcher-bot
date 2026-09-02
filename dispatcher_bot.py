@@ -27,7 +27,7 @@ except ImportError:
         "Новоселов", "Никольского", "Полевая", "Скандинавская", "Западно-Сибирская",
         "Фабричная", "Беляева", "Дружбы", "Миллираторов", "Моторостроителей",
         "Республики", "Советская", "Ленина", "Гагарина", "Широтная",
-        "Сидора Путилова", "Путилова", "Сидорова"
+        "Сидора Путилова", "Путилова", "Сидорова", "Николая Зелинского"  # добавлена улица
     ]
     logging.warning("Файл streets.py не найден, используется базовый список улиц.")
 
@@ -577,6 +577,7 @@ def parse_zvonok(body):
         'технопол': 'Tecno', 'tecno': 'Tecno', 'техно': 'Tecno',
         'киви': 'KIVI', 'kivi': 'KIVI',
         'бош': 'Bosch',
+        'вестель': 'Vestel', 'вестел': 'Vestel', 'vestel': 'Vestel',  # добавлено
         'плейстейшн': 'PlayStation', 'плейстайшн': 'PlayStation',
         'плюстшн': 'PlayStation', 'плюс сейшн': 'PlayStation',
         'playstation': 'PlayStation', 'ps4': 'PlayStation 4', 'ps5': 'PlayStation 5',
@@ -615,7 +616,7 @@ def parse_zvonok(body):
             'bork', 'kiv', 'midea', 'hisense', 'хисенс', 'hyundai', 'daewoo', 'rowenta',
             'grundig', 'loewe', 'bang & olufsen', 'аристон', 'ariston', 'hotpoint', 'саратов',
             'honor', 'онор', 'tecno', 'технопол', 'техно', 'kivi', 'киви', 'бош', 'элджи', 'элжи', 'эл джи',
-            'оджи', 'олджи', 'беко', 'бэко'
+            'оджи', 'олджи', 'беко', 'бэко', 'вестель', 'вестel', 'vestel'  # добавлено
         ]
         text_for_brand = client_text_lower if client_text_lower.strip() else all_text_lower
         if category_key != "other":
