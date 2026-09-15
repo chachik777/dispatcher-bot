@@ -402,10 +402,21 @@ def parse_site(body):
     address = "не указано"
     time_wish = "не указано"
 
-    # Проверяем, что это письмо действительно с нашего сайта
-    if ("proftech-service" not in body.lower()
-        and "заявка с сайта" not in body.lower()
-        and "web3forms" not in body.lower()):
+    # DEBUG: смотрим первые 300 символов
+    logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
+
+    body_lower = body.lower()
+
+    # Ослабленная проверка: ищем любой из маркеров Web3Forms
+    if not (
+        "proftech-service" in body_lower
+        or "заявка с сайта" in body_lower
+        or "web3forms" in body_lower
+        or "a new form has been submitted" in body_lower
+        or "don't want these emails anymore" in body_lower
+        or "details below" in body_lower
+    ):
+        logger.info("parse_site: письмо не похоже на заявку с сайта, пропускаем")
         return None
 
     # Web3Forms формат:
@@ -1143,6 +1154,8 @@ def _imap_task():
                                     or "заявка с сайта" in subject.lower()
                                     or "web3forms" in sender.lower()
                                     or "web3forms" in body.lower()
+                                    or "a new form has been submitted" in body.lower()
+                                    or "don't want these emails anymore" in body.lower()
                                 )
                                 if is_zvonok:
                                     parsed = parse_zvonok(body)
@@ -1152,7 +1165,7 @@ def _imap_task():
                                 elif is_site:
                                     parsed = parse_site(body)
                                     if parsed is None:
-                                        logger.info("Заявка с сайта без телефона, пропускаем")
+                                        logger.info("Заявка с сайта не распарсена, пропускаем")
                                         continue
                                     final_text, category_key = parsed
                                 elif "bothelp.io" in sender.lower() or "bothelp.io" in body.lower():
