@@ -402,67 +402,45 @@ def parse_site(body):
     address = "не указано"
     time_wish = "не указано"
 
-    # DEBUG: смотрим первые 300 символов
+    # DEBUG
     logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
 
-    body_lower = body.lower()
+    # Web3Forms формат: "name  : Иван\r\nphone  : +7...\r\ncategory  : ..."
+    # Значение на ТОЙ ЖЕ строке, поля разделены \r\n или \n.
+    # Также встречается формат "Field\nvalue" — подстрахуемся.
 
-    # Ослабленная проверка: ищем любой из маркеров Web3Forms
-    if not (
-        "proftech-service" in body_lower
-        or "заявка с сайта" in body_lower
-        or "web3forms" in body_lower
-        or "a new form has been submitted" in body_lower
-        or "don't want these emails anymore" in body_lower
-        or "details below" in body_lower
-    ):
-        logger.info("parse_site: письмо не похоже на заявку с сайта, пропускаем")
-        return None
-
-    # Web3Forms формат:
-    #   "Name\nфывфыв\n\nPhone\n+7 (312) 312-31-23\n\nCategory\nТелевизор\n..."
     def extract_field(field_name):
-        # Вариант 1: "Field\nvalue" (с любым количеством пустых строк между ними)
-        pattern = re.compile(
-            r'^\s*' + re.escape(field_name) + r'\s*:?\s*\n+\s*([^\n]+)',
+        # Вариант 1: "Field : value" (значение на той же строке, через двоеточие)
+        pattern1 = re.compile(
+            r'^\s*' + re.escape(field_name) + r'\s*:\s*([^\r\n]+)',
             re.MULTILINE | re.IGNORECASE
         )
-        match = pattern.search(body)
-        if match:
-            val = match.group(1).strip()
+        m1 = pattern1.search(body)
+        if m1:
+            val = m1.group(1).strip()
             if val and val.lower() != field_name.lower():
                 return val
-        # Вариант 2: "Field: value" (одной строкой)
+        # Вариант 2: "Field\nvalue" (значение на новой строке)
         pattern2 = re.compile(
-            r'^\s*' + re.escape(field_name) + r'\s*:\s*([^\n]+)',
+            r'^\s*' + re.escape(field_name) + r'\s*\n+\s*([^\r\n]+)',
             re.MULTILINE | re.IGNORECASE
         )
-        match2 = pattern2.search(body)
-        if match2:
-            val = match2.group(1).strip()
-            if val and val.lower() != field_name.lower():
-                return val
-        # Вариант 3: "Field value" через пробел
-        pattern3 = re.compile(
-            r'^\s*' + re.escape(field_name) + r'\s+([^\n]+)',
-            re.MULTILINE | re.IGNORECASE
-        )
-        match3 = pattern3.search(body)
-        if match3:
-            val = match3.group(1).strip()
+        m2 = pattern2.search(body)
+        if m2:
+            val = m2.group(1).strip()
             if val and val.lower() != field_name.lower():
                 return val
         return None
 
-    # Имя (name)
+    # Имя
     raw = extract_field('name') or extract_field('имя')
     if raw and len(raw) >= 2 and raw.lower() not in ('телефон', 'имя', 'не указано', ''):
         name = raw
 
-    # Телефон (phone)
+    # Телефон
     raw_phone = extract_field('phone') or extract_field('телефон')
     if not raw_phone:
-        logger.info(f"Сайт: номер телефона не найден. Тело письма (первые 500 символов): {body[:500]}")
+        logger.info(f"Сайт: номер телефона не найден. Тело письма: {body[:500]!r}")
         return None
     digits = re.sub(r'\D', '', raw_phone)
     if len(digits) == 11 and digits.startswith('8'):
@@ -474,7 +452,7 @@ def parse_site(body):
     else:
         phone = raw_phone
 
-    # Категория (category)
+    # Категория
     raw_cat = extract_field('category') or extract_field('категория')
     if raw_cat and raw_cat.lower() not in ('не указана', ''):
         category_display = raw_cat
@@ -499,22 +477,22 @@ def parse_site(body):
                 category_key = val
                 break
 
-    # Марка (brand)
+    # Марка
     raw = extract_field('brand') or extract_field('марка')
     if raw and raw.lower() not in ('не указано', 'не знаю', ''):
         brand = raw
 
-    # Проблема (problem)
+    # Проблема
     raw = extract_field('problem') or extract_field('проблема')
     if raw:
         problem = raw
 
-    # Адрес (address)
+    # Адрес
     raw = extract_field('address') or extract_field('адрес')
     if raw and raw.lower() not in ('не указано', ''):
         address = raw
 
-    # Время (time)
+    # Время
     raw = extract_field('time') or extract_field('удобное время')
     if raw and raw.lower() not in ('не указано', ''):
         time_wish = raw
@@ -533,7 +511,6 @@ def parse_site(body):
 
 # ---------- ОСНОВНАЯ ФУНКЦИЯ ПАРСИНГА ZVONOK ----------
 def parse_zvonok(body):
-    # ---------- Извлечение телефона ----------
     phone = "не указан"
     header_phone_match = re.search(r'Телефон:\s*([+\d\s]+)', body)
     header_phone = header_phone_match.group(1).strip() if header_phone_match else None
@@ -603,7 +580,6 @@ def parse_zvonok(body):
             f"⚠️ Не удалось извлечь реплики клиента\n"
         ), "other"
 
-    # ---------- Проверка отказа ----------
     refusal_phrases = re.compile(
         r'(не ремонтируем|не занимаемся|только целиком|платы мы не ремонтируем|'
         r'не входит|не в наши услуги|слесарными работами|открутить|гайку|'
@@ -623,7 +599,6 @@ def parse_zvonok(body):
     warranty_phrases = re.compile(r'(гарантия|гарантийный случай|мастер уже был|по гарантии)', re.IGNORECASE)
     is_warranty = any(warranty_phrases.search(line) for line in client_lines + robot_lines)
 
-    # ---------- ИНИЦИАЛИЗАЦИЯ ----------
     category_key = "other"
     brand = "не указано"
     problem = "не указано"
@@ -635,7 +610,6 @@ def parse_zvonok(body):
     all_text = client_text + ' ' + ' '.join(robot_lines)
     all_text_lower = all_text.lower()
 
-    # ---------- 1. ОПРЕДЕЛЕНИЕ КАТЕГОРИИ ----------
     def detect_category_from_text(text_lower):
         if re.search(r'(игровая приставка|приставка|playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo|джойстик|геймпад|игровая штука|игровая)', text_lower):
             return "console"
@@ -669,10 +643,8 @@ def parse_zvonok(body):
     if category_key is None:
         category_key = "other"
 
-    # ---------- 2. МАРКА ----------
     brand_aliases = {
-        'хаер': 'Haier', 'haier': 'Haier',
-        'хайр': 'Haier',
+        'хаер': 'Haier', 'haier': 'Haier', 'хайр': 'Haier',
         'аристон': 'Ariston', 'ariston': 'Ariston',
         'bosch': 'Bosch', 'samsung': 'Samsung', 'lg': 'LG', 'элджи': 'LG', 'элжи': 'LG', 'эл джи': 'LG',
         'оджи': 'LG', 'олджи': 'LG',
@@ -685,9 +657,8 @@ def parse_zvonok(body):
         'горение': 'Gorenje',
         'liebherr': 'Liebherr', 'sharp': 'Sharp', 'panasonic': 'Panasonic',
         'toshiba': 'Toshiba', 'hitachi': 'Hitachi', 'mitsubishi': 'Mitsubishi',
-        'мицубиши': 'Mitsubishi', 'митсубиши': 'Mitsubishi', 'не судишийтих': 'Mitsubishi',
-        'york': 'York', 'daewoo': 'Daewoo', 'hyundai': 'Hyundai',
-        'хундай': 'Hyundai',
+        'мицубиши': 'Mitsubishi', 'митсубиши': 'Mitsubishi',
+        'york': 'York', 'daewoo': 'Daewoo', 'hyundai': 'Hyundai', 'хундай': 'Hyundai',
         'vitek': 'Vitek', 'redmond': 'Redmond', 'tefal': 'Tefal',
         'асус': 'Asus', 'asus': 'Asus', 'acer': 'Acer', 'lenovo': 'Lenovo',
         'hp': 'HP', 'эйчпи': 'HP', 'хп': 'HP', 'dell': 'Dell',
@@ -773,7 +744,6 @@ def parse_zvonok(body):
                     brand = b
                 break
 
-    # ---------- 3. НЕИСПРАВНОСТЬ ----------
     problem_pattern = re.compile(
         r'(не запускается|не работает|не включается|не греет|не холодит|не морозит|сломалась|сломался|неисправность|'
         r'моргает|шумит|течёт|не держит|не охлаждает|не реагирует|не открывается|не закрывается|не крутит|не сливает|'
@@ -823,7 +793,6 @@ def parse_zvonok(body):
                 final_problem = line
                 break
 
-    # ---------- 4. АДРЕС ----------
     full_client_text = client_text
     full_client_text = re.sub(r'\b(здравствуйте|алло|до свидания|спасибо|пожалуйста|да|нет|ага|угу|ок|хорошо|всего доброго)\b', '', full_client_text, flags=re.IGNORECASE)
     full_client_text = re.sub(r'\s+', ' ', full_client_text).strip()
@@ -854,7 +823,6 @@ def parse_zvonok(body):
     else:
         problem = "не указана"
 
-    # ---------- 5. ВРЕМЯ ----------
     time = "не указано"
     time_patterns = [
         r'(с\s*(\d{1,2})\s*(?:до|по)\s*(\d{1,2})\s*(?:часов?|ч\.?))',
@@ -1154,8 +1122,6 @@ def _imap_task():
                                     or "заявка с сайта" in subject.lower()
                                     or "web3forms" in sender.lower()
                                     or "web3forms" in body.lower()
-                                    or "a new form has been submitted" in body.lower()
-                                    or "don't want these emails anymore" in body.lower()
                                 )
                                 if is_zvonok:
                                     parsed = parse_zvonok(body)
