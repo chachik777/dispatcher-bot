@@ -403,12 +403,13 @@ def parse_site(body):
     time_wish = "не указано"
 
     # Проверяем, что это письмо действительно с нашего сайта
-    if "proftech-service" not in body.lower() and "заявка с сайта" not in body.lower():
+    if ("proftech-service" not in body.lower()
+        and "заявка с сайта" not in body.lower()
+        and "web3forms" not in body.lower()):
         return None
 
     # Web3Forms формат: имя поля на одной строке, значение на следующей
     def extract_field(field_name):
-        # Ищем "field_name\nvalue" или "field_name:\nvalue"
         pattern = re.compile(
             r'^' + re.escape(field_name) + r'\s*:?\s*\n\s*([^\n]*)',
             re.MULTILINE | re.IGNORECASE
@@ -1111,7 +1112,14 @@ def _imap_task():
                             if body:
                                 body = re.sub(r'Отправлено из мобильной Почты Mail.*?-------- Пересылаемое сообщение --------', '', body, flags=re.DOTALL).strip()
                                 is_zvonok = ("zvonok.com" in sender.lower() or "zvonok.com" in body.lower() or ("phone:" in body and "call_id:" in body))
-                                is_site = ("proftech-service" in body.lower() or "заявка с сайта" in body.lower())
+                                is_site = (
+                                    "proftech-service" in body.lower()
+                                    or "заявка с сайта" in body.lower()
+                                    or "proftech-service" in subject.lower()
+                                    or "заявка с сайта" in subject.lower()
+                                    or "web3forms" in sender.lower()
+                                    or "web3forms" in body.lower()
+                                )
                                 if is_zvonok:
                                     parsed = parse_zvonok(body)
                                     if parsed is None:
