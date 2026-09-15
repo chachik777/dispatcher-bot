@@ -392,25 +392,21 @@ def parse_craftum(body):
     ), None
 
 def parse_site(body):
-    """Парсер заявок с нашего сайта proftech-service (Web3Forms)."""
+    """Парсер заявок с нашего сайта proftech-service (Web3Forms).
+    Форма содержит только: name, phone, category.
+    Остальные поля (brand, problem, address, time) мастер уточняет сам.
+    """
     name = "не указано"
     phone = "не указан"
     category_key = "other"
     category_display = "не указана"
-    brand = "не указано"
-    problem = "не указана"
-    address = "не указано"
-    time_wish = "не указано"
 
     # DEBUG
     logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
 
     # Web3Forms формат: "name  : Иван\r\nphone  : +7...\r\ncategory  : ..."
-    # Значение на ТОЙ ЖЕ строке, поля разделены \r\n или \n.
-    # Также встречается формат "Field\nvalue" — подстрахуемся.
-
     def extract_field(field_name):
-        # Вариант 1: "Field : value" (значение на той же строке, через двоеточие)
+        # Вариант 1: "Field : value" (на той же строке)
         pattern1 = re.compile(
             r'^\s*' + re.escape(field_name) + r'\s*:\s*([^\r\n]+)',
             re.MULTILINE | re.IGNORECASE
@@ -420,7 +416,7 @@ def parse_site(body):
             val = m1.group(1).strip()
             if val and val.lower() != field_name.lower():
                 return val
-        # Вариант 2: "Field\nvalue" (значение на новой строке)
+        # Вариант 2: "Field\nvalue" (на новой строке)
         pattern2 = re.compile(
             r'^\s*' + re.escape(field_name) + r'\s*\n+\s*([^\r\n]+)',
             re.MULTILINE | re.IGNORECASE
@@ -477,35 +473,11 @@ def parse_site(body):
                 category_key = val
                 break
 
-    # Марка
-    raw = extract_field('brand') or extract_field('марка')
-    if raw and raw.lower() not in ('не указано', 'не знаю', ''):
-        brand = raw
-
-    # Проблема
-    raw = extract_field('problem') or extract_field('проблема')
-    if raw:
-        problem = raw
-
-    # Адрес
-    raw = extract_field('address') or extract_field('адрес')
-    if raw and raw.lower() not in ('не указано', ''):
-        address = raw
-
-    # Время
-    raw = extract_field('time') or extract_field('удобное время')
-    if raw and raw.lower() not in ('не указано', ''):
-        time_wish = raw
-
     message = (
         "🚨 Новая заявка (Сайт)!\n"
         f"👤 Имя: {name}\n"
         f"📞 Телефон: {phone}\n"
         f"📋 Категория: {category_display}\n"
-        f"🏣 Марка: {brand}\n"
-        f"⚙️ Неисправность: {problem}\n"
-        f"📭 Адрес: {address}\n"
-        f"🕒 Время: {time_wish}\n"
     )
     return message, category_key
 
