@@ -408,15 +408,39 @@ def parse_site(body):
         and "web3forms" not in body.lower()):
         return None
 
-    # Web3Forms формат: имя поля на одной строке, значение на следующей
+    # Web3Forms формат:
+    #   "Name\nфывфыв\n\nPhone\n+7 (312) 312-31-23\n\nCategory\nТелевизор\n..."
     def extract_field(field_name):
+        # Вариант 1: "Field\nvalue" (с любым количеством пустых строк между ними)
         pattern = re.compile(
-            r'^' + re.escape(field_name) + r'\s*:?\s*\n\s*([^\n]*)',
+            r'^\s*' + re.escape(field_name) + r'\s*:?\s*\n+\s*([^\n]+)',
             re.MULTILINE | re.IGNORECASE
         )
         match = pattern.search(body)
         if match:
-            return match.group(1).strip()
+            val = match.group(1).strip()
+            if val and val.lower() != field_name.lower():
+                return val
+        # Вариант 2: "Field: value" (одной строкой)
+        pattern2 = re.compile(
+            r'^\s*' + re.escape(field_name) + r'\s*:\s*([^\n]+)',
+            re.MULTILINE | re.IGNORECASE
+        )
+        match2 = pattern2.search(body)
+        if match2:
+            val = match2.group(1).strip()
+            if val and val.lower() != field_name.lower():
+                return val
+        # Вариант 3: "Field value" через пробел
+        pattern3 = re.compile(
+            r'^\s*' + re.escape(field_name) + r'\s+([^\n]+)',
+            re.MULTILINE | re.IGNORECASE
+        )
+        match3 = pattern3.search(body)
+        if match3:
+            val = match3.group(1).strip()
+            if val and val.lower() != field_name.lower():
+                return val
         return None
 
     # Имя (name)
@@ -427,7 +451,7 @@ def parse_site(body):
     # Телефон (phone)
     raw_phone = extract_field('phone') or extract_field('телефон')
     if not raw_phone:
-        logger.info("Сайт: номер телефона не найден, пропускаем")
+        logger.info(f"Сайт: номер телефона не найден. Тело письма (первые 500 символов): {body[:500]}")
         return None
     digits = re.sub(r'\D', '', raw_phone)
     if len(digits) == 11 and digits.startswith('8'):
