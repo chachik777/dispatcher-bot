@@ -392,7 +392,7 @@ def parse_craftum(body):
     ), None
 
 def parse_site(body):
-    """Парсер заявок с нашего сайта proftech-service."""
+    """Парсер заявок с нашего сайта proftech-service (Web3Forms)."""
     name = "не указано"
     phone = "не указан"
     category_key = "other"
@@ -406,19 +406,28 @@ def parse_site(body):
     if "proftech-service" not in body.lower() and "заявка с сайта" not in body.lower():
         return None
 
-    # Имя
-    name_match = re.search(r'Имя:\s*\n?\s*([^\n]*)', body)
-    if name_match:
-        raw = name_match.group(1).strip()
-        if raw and raw.lower() not in ('телефон', 'имя', 'не указано', ''):
-            name = raw
+    # Web3Forms формат: имя поля на одной строке, значение на следующей
+    def extract_field(field_name):
+        # Ищем "field_name\nvalue" или "field_name:\nvalue"
+        pattern = re.compile(
+            r'^' + re.escape(field_name) + r'\s*:?\s*\n\s*([^\n]*)',
+            re.MULTILINE | re.IGNORECASE
+        )
+        match = pattern.search(body)
+        if match:
+            return match.group(1).strip()
+        return None
 
-    # Телефон
-    phone_match = re.search(r'Телефон:\s*\n?\s*(\+?[\d\s\(\)\-]{10,})', body)
-    if not phone_match:
+    # Имя (name)
+    raw = extract_field('name') or extract_field('имя')
+    if raw and len(raw) >= 2 and raw.lower() not in ('телефон', 'имя', 'не указано', ''):
+        name = raw
+
+    # Телефон (phone)
+    raw_phone = extract_field('phone') or extract_field('телефон')
+    if not raw_phone:
         logger.info("Сайт: номер телефона не найден, пропускаем")
         return None
-    raw_phone = phone_match.group(1).strip()
     digits = re.sub(r'\D', '', raw_phone)
     if len(digits) == 11 and digits.startswith('8'):
         digits = '7' + digits[1:]
@@ -429,60 +438,50 @@ def parse_site(body):
     else:
         phone = raw_phone
 
-    # Категория (из выпадающего списка)
-    cat_match = re.search(r'Категория:\s*\n?\s*([^\n]*)', body)
-    if cat_match:
-        raw_cat = cat_match.group(1).strip()
-        if raw_cat and raw_cat.lower() not in ('не указана', ''):
-            category_display = raw_cat
-            raw_cat_low = raw_cat.lower()
-            cat_map = [
-                ('компьютер', 'computers'), ('ноутбук', 'computers'), ('моноблок', 'computers'), ('пк', 'computers'),
-                ('стиральн', 'appliances'), ('посудомоечн', 'appliances'), ('плита', 'appliances'),
-                ('духовой шкаф', 'appliances'), ('варочн', 'appliances'),
-                ('холодильник', 'refrigerators'),
-                ('кондиционер', 'cond'),
-                ('телевизор', 'tv'),
-                ('принтер', 'orgtech'), ('мфу', 'orgtech'), ('оргтехника', 'orgtech'),
-                ('телефон', 'phone'), ('смартфон', 'phone'), ('планшет', 'phone'),
-                ('пылесос', 'vacuum'),
-                ('микроволновк', 'microwave'),
-                ('кофемашин', 'coffee'),
-                ('колонка', 'speaker'),
-                ('приставка', 'console'),
-            ]
-            for key, val in cat_map:
-                if key in raw_cat_low:
-                    category_key = val
-                    break
+    # Категория (category)
+    raw_cat = extract_field('category') or extract_field('категория')
+    if raw_cat and raw_cat.lower() not in ('не указана', ''):
+        category_display = raw_cat
+        raw_cat_low = raw_cat.lower()
+        cat_map = [
+            ('компьютер', 'computers'), ('ноутбук', 'computers'), ('моноблок', 'computers'), ('пк', 'computers'),
+            ('стиральн', 'appliances'), ('посудомоечн', 'appliances'), ('плита', 'appliances'),
+            ('духовой шкаф', 'appliances'), ('варочн', 'appliances'),
+            ('холодильник', 'refrigerators'),
+            ('кондиционер', 'cond'),
+            ('телевизор', 'tv'),
+            ('принтер', 'orgtech'), ('мфу', 'orgtech'), ('оргтехника', 'orgtech'),
+            ('телефон', 'phone'), ('смартфон', 'phone'), ('планшет', 'phone'),
+            ('пылесос', 'vacuum'),
+            ('микроволновк', 'microwave'),
+            ('кофемашин', 'coffee'),
+            ('колонка', 'speaker'),
+            ('приставка', 'console'),
+        ]
+        for key, val in cat_map:
+            if key in raw_cat_low:
+                category_key = val
+                break
 
-    # Марка
-    brand_match = re.search(r'Марка:\s*\n?\s*([^\n]*)', body)
-    if brand_match:
-        raw = brand_match.group(1).strip()
-        if raw and raw.lower() not in ('не указано', 'не знаю', ''):
-            brand = raw
+    # Марка (brand)
+    raw = extract_field('brand') or extract_field('марка')
+    if raw and raw.lower() not in ('не указано', 'не знаю', ''):
+        brand = raw
 
-    # Проблема
-    prob_match = re.search(r'Проблема:\s*\n?\s*([^\n]*)', body)
-    if prob_match:
-        raw = prob_match.group(1).strip()
-        if raw:
-            problem = raw
+    # Проблема (problem)
+    raw = extract_field('problem') or extract_field('проблема')
+    if raw:
+        problem = raw
 
-    # Адрес
-    addr_match = re.search(r'Адрес:\s*\n?\s*([^\n]*)', body)
-    if addr_match:
-        raw = addr_match.group(1).strip()
-        if raw and raw.lower() not in ('не указано', ''):
-            address = raw
+    # Адрес (address)
+    raw = extract_field('address') or extract_field('адрес')
+    if raw and raw.lower() not in ('не указано', ''):
+        address = raw
 
-    # Время
-    time_match = re.search(r'Удобное время:\s*\n?\s*([^\n]*)', body)
-    if time_match:
-        raw = time_match.group(1).strip()
-        if raw and raw.lower() not in ('не указано', ''):
-            time_wish = raw
+    # Время (time)
+    raw = extract_field('time') or extract_field('удобное время')
+    if raw and raw.lower() not in ('не указано', ''):
+        time_wish = raw
 
     message = (
         "🚨 Новая заявка (Сайт)!\n"
