@@ -393,14 +393,15 @@ def parse_craftum(body):
 
 def parse_site(body):
     """Парсер заявок с нашего сайта proftech-service (Web3Forms).
-    Форма содержит: name, phone, category, time.
-    Остальные поля (brand, problem, address) мастер уточняет сам.
+    Форма содержит: name, phone, category, time, problem (для квиза).
+    Остальные поля (brand, address) мастер уточняет сам.
     """
     name = "не указано"
     phone = "не указан"
     category_key = "other"
     category_display = "не указана"
     time_display = "не указано"
+    problem_display = "не указано"
 
     # DEBUG
     logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
@@ -474,16 +475,22 @@ def parse_site(body):
                 category_key = val
                 break
 
-    # ⏰ Удобное время (новое поле)
+    # ⏰ Удобное время
     raw_time = extract_field('time') or extract_field('время')
     if raw_time and raw_time.lower() not in ('не указано', ''):
         time_display = raw_time
+
+    # ⚙️ Неисправность (для квиза)
+    raw_problem = extract_field('problem') or extract_field('неисправность')
+    if raw_problem and raw_problem.lower() not in ('не указано', ''):
+        problem_display = raw_problem
 
     message = (
         "🚨 Новая заявка (Сайт)!\n"
         f"👤 Имя: {name}\n"
         f"📞 Телефон: {phone}\n"
         f"📋 Категория: {category_display}\n"
+        f"⚙️ Неисправность: {problem_display}\n"
         f"⏰ Удобное время: {time_display}\n"
     )
     return message, category_key
