@@ -88,21 +88,21 @@ IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
 GROUPS = {
     "computers": [
-        -1004355591778,   # Даня
-        -1003976268046,   # Александр
-        -1003395683617,   # Витя
-        -1004445931308,   # Игорь
-        -1003734200853    # Денис
+        -1004355591778,
+        -1003976268046,
+        -1003395683617,
+        -1004445931308,
+        -1003734200853
     ],
     "appliances": [
-        -1003975989333,   # Евгений
-        -1003981596959    # Александр Лобанов
+        -1003975989333,
+        -1003981596959
     ],
     "refrigerators": [-1004352137129, -1004382888384],
     "cond": [-1004445931308, -1004486734839, -1004352137129],
-    "tv": [-5402877244],   # Стас
-    "orgtech": [-1004360815294],   # Эдик
-    "phone": [-1004355591778],     # Даня
+    "tv": [-5402877244],
+    "orgtech": [-1004360815294],
+    "phone": [-1004355591778],
     "vacuum": [-1003896694214],
     "microwave": [-1003896694214],
     "coffee": [-1003896694214],
@@ -392,10 +392,7 @@ def parse_craftum(body):
     ), None
 
 def parse_site(body):
-    """Парсер заявок с нашего сайта proftech-service (Web3Forms).
-    Форма содержит: name, phone, category, time, problem (для квиза).
-    Остальные поля (brand, address) мастер уточняет сам.
-    """
+    """Парсер заявок с нашего сайта proftech-service (Web3Forms)."""
     name = "не указано"
     phone = "не указан"
     category_key = "other"
@@ -403,12 +400,9 @@ def parse_site(body):
     time_display = "не указано"
     problem_display = "не указано"
 
-    # DEBUG
     logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
 
-    # Web3Forms формат: "name  : Иван\r\nphone  : +7...\r\ncategory  : ..."
     def extract_field(field_name):
-        # Вариант 1: "Field : value" (на той же строке)
         pattern1 = re.compile(
             r'^\s*' + re.escape(field_name) + r'\s*:\s*([^\r\n]+)',
             re.MULTILINE | re.IGNORECASE
@@ -418,7 +412,6 @@ def parse_site(body):
             val = m1.group(1).strip()
             if val and val.lower() != field_name.lower():
                 return val
-        # Вариант 2: "Field\nvalue" (на новой строке)
         pattern2 = re.compile(
             r'^\s*' + re.escape(field_name) + r'\s*\n+\s*([^\r\n]+)',
             re.MULTILINE | re.IGNORECASE
@@ -430,12 +423,10 @@ def parse_site(body):
                 return val
         return None
 
-    # Имя
     raw = extract_field('name') or extract_field('имя')
     if raw and len(raw) >= 2 and raw.lower() not in ('телефон', 'имя', 'не указано', ''):
         name = raw
 
-    # Телефон
     raw_phone = extract_field('phone') or extract_field('телефон')
     if not raw_phone:
         logger.info(f"Сайт: номер телефона не найден. Тело письма: {body[:500]!r}")
@@ -450,7 +441,6 @@ def parse_site(body):
     else:
         phone = raw_phone
 
-    # Категория
     raw_cat = extract_field('category') or extract_field('категория')
     if raw_cat and raw_cat.lower() not in ('не указана', ''):
         category_display = raw_cat
@@ -475,12 +465,10 @@ def parse_site(body):
                 category_key = val
                 break
 
-    # ⏰ Удобное время
     raw_time = extract_field('time') or extract_field('время')
     if raw_time and raw_time.lower() not in ('не указано', ''):
         time_display = raw_time
 
-    # ⚙️ Неисправность (для квиза)
     raw_problem = extract_field('problem') or extract_field('неисправность')
     if raw_problem and raw_problem.lower() not in ('не указано', ''):
         problem_display = raw_problem
@@ -1203,7 +1191,11 @@ async def main():
     await application.initialize()
     await application.start()
     asyncio.create_task(poll_mail())
-    await application.updater.start_polling(poll_interval=0.5, drop_pending_updates=True)
+    await application.updater.start_polling(
+        poll_interval=0.5,
+        drop_pending_updates=True,
+        allowed_updates=["message", "edited_message", "callback_query", "channel_post", "edited_channel_post"]
+    )
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
