@@ -393,13 +393,16 @@ def parse_craftum(body):
     ), None
 
 def parse_site(body):
-    """Парсер заявок с нашего сайта proftech-service (Web3Forms)."""
+    """Парсер заявок с сайта proftech-service (Worker/Cloudflare)."""
     name = "не указано"
     phone = "не указан"
     category_key = "other"
     category_display = "не указана"
     time_display = "не указано"
     problem_display = "не указано"
+    brand_display = ""
+    age_display = ""
+    price_display = ""
 
     logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
 
@@ -413,24 +416,17 @@ def parse_site(body):
             val = m1.group(1).strip()
             if val and val.lower() != field_name.lower():
                 return val
-        pattern2 = re.compile(
-            r'^\s*' + re.escape(field_name) + r'\s*\n+\s*([^\r\n]+)',
-            re.MULTILINE | re.IGNORECASE
-        )
-        m2 = pattern2.search(body)
-        if m2:
-            val = m2.group(1).strip()
-            if val and val.lower() != field_name.lower():
-                return val
         return None
 
-    raw = extract_field('name') or extract_field('имя')
+    # Имя
+    raw = extract_field('👤 Имя') or extract_field('Имя') or extract_field('name')
     if raw and len(raw) >= 2 and raw.lower() not in ('телефон', 'имя', 'не указано', ''):
         name = raw
 
-    raw_phone = extract_field('phone') or extract_field('телефон')
+    # Телефон
+    raw_phone = extract_field('📞 Телефон') or extract_field('Телефон') or extract_field('phone')
     if not raw_phone:
-        logger.info(f"Сайт: номер телефона не найден. Тело письма: {body[:500]!r}")
+        logger.info(f"Сайт: номер телефона не найден. Тело: {body[:500]!r}")
         return None
     digits = re.sub(r'\D', '', raw_phone)
     if len(digits) == 11 and digits.startswith('8'):
@@ -442,14 +438,15 @@ def parse_site(body):
     else:
         phone = raw_phone
 
-    raw_cat = extract_field('category') or extract_field('категория')
+    # Категория
+    raw_cat = extract_field('📋 Категория') or extract_field('Категория') or extract_field('category')
     if raw_cat and raw_cat.lower() not in ('не указана', ''):
         category_display = raw_cat
         raw_cat_low = raw_cat.lower()
         cat_map = [
             ('компьютер', 'computers'), ('ноутбук', 'computers'), ('моноблок', 'computers'), ('пк', 'computers'),
             ('стиральн', 'appliances'), ('посудомоечн', 'appliances'), ('плита', 'appliances'),
-            ('духовой шкаф', 'appliances'), ('варочн', 'appliances'),
+            ('духовой шкаф', 'appliances'), ('варочн', 'appliances'), ('водонагревател', 'appliances'),
             ('холодильник', 'refrigerators'),
             ('кондиционер', 'cond'),
             ('телевизор', 'tv'),
@@ -459,29 +456,54 @@ def parse_site(body):
             ('микроволновк', 'microwave'),
             ('кофемашин', 'coffee'),
             ('колонка', 'speaker'),
-            ('приставка', 'console'),
+            ('приставка', 'console'), ('игровая', 'console'),
         ]
         for key, val in cat_map:
             if key in raw_cat_low:
                 category_key = val
                 break
 
-    raw_time = extract_field('time') or extract_field('время')
+    # Удобное время
+    raw_time = extract_field('⏰ Удобное время') or extract_field('Удобное время') or extract_field('time')
     if raw_time and raw_time.lower() not in ('не указано', ''):
         time_display = raw_time
 
-    raw_problem = extract_field('problem') or extract_field('неисправность')
+    # Неисправность
+    raw_problem = extract_field('⚙️ Неисправность') or extract_field('Неисправность') or extract_field('problem')
     if raw_problem and raw_problem.lower() not in ('не указано', ''):
         problem_display = raw_problem
 
+    # Бренд
+    raw_brand = extract_field('🏷 Бренд') or extract_field('Бренд') or extract_field('brand')
+    if raw_brand and raw_brand.lower() not in ('не указан', ''):
+        brand_display = raw_brand
+
+    # Возраст
+    raw_age = extract_field('📅 Возраст') or extract_field('Возраст') or extract_field('age')
+    if raw_age and raw_age.lower() not in ('не указан', ''):
+        age_display = raw_age
+
+    # Примерная цена
+    raw_price = extract_field('💰 Примерная цена') or extract_field('Примерная цена') or extract_field('price')
+    if raw_price:
+        price_display = raw_price
+
+    # Формируем сообщение
     message = (
         "🚨 Новая заявка (Сайт)!\n"
         f"👤 Имя: {name}\n"
         f"📞 Телефон: {phone}\n"
         f"📋 Категория: {category_display}\n"
         f"⚙️ Неисправность: {problem_display}\n"
-        f"⏰ Удобное время: {time_display}\n"
     )
+    if brand_display:
+        message += f"🏷 Бренд: {brand_display}\n"
+    if age_display:
+        message += f"📅 Возраст: {age_display}\n"
+    message += f"⏰ Удобное время: {time_display}\n"
+    if price_display:
+        message += f"💰 Примерная цена: {price_display}\n"
+
     return message, category_key
 
 # ---------- ХЕЛПЕРЫ ДЛЯ ZVONOK ----------
