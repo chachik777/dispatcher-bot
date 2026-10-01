@@ -89,7 +89,7 @@ EMAIL = os.getenv("EMAIL", "dir72.pk@mail.ru")
 PASSWORD = os.getenv("PASSWORD", "afStBLqMmNzQtZNkc0Mv")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
-WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_PORT = int(os.getenv("PORT", "80"))
 
 GROUPS = {
     "computers": [-1004355591778, -1003976268046, -1003395683617, -1004445931308, -1003734200853],
