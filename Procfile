@@ -1,1 +1,1 @@
-worker: python dispatcher_bot.py
+web: python dispatcher_bot.py
