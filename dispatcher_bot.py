@@ -18,6 +18,8 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters
 from telegram.error import ChatMigrated, TimedOut, NetworkError, TelegramError
 
+from aiohttp import web
+
 # ---------- ИМПОРТ СПИСКА УЛИЦ ----------
 try:
     from streets import KNOWN_STREETS
@@ -87,18 +89,11 @@ EMAIL = os.getenv("EMAIL", "dir72.pk@mail.ru")
 PASSWORD = os.getenv("PASSWORD", "afStBLqMmNzQtZNkc0Mv")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
+WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
+
 GROUPS = {
-    "computers": [
-        -1004355591778,
-        -1003976268046,
-        -1003395683617,
-        -1004445931308,
-        -1003734200853
-    ],
-    "appliances": [
-        -1003975989333,
-        -1003981596959
-    ],
+    "computers": [-1004355591778, -1003976268046, -1003395683617, -1004445931308, -1003734200853],
+    "appliances": [-1003975989333, -1003981596959],
     "refrigerators": [-1004352137129, -1004382888384],
     "cond": [-1004445931308, -1004486734839, -1004352137129],
     "tv": [-5402877244],
@@ -181,9 +176,7 @@ def is_price_question(text):
     return bool(re.search(r'(цена|стоимость|сколько стоит|рублей|тысяч|руб|тыс|₽|полторы тысячи|от \d+|\d+ рублей|\d+ тыс)', text.lower()))
 
 def is_meaningful_issue(text):
-    text_clean = text.strip()
-    text_clean = text_clean.rstrip('.,!?;:')
-    text_clean = text_clean.strip()
+    text_clean = text.strip().rstrip('.,!?;:').strip()
     if len(text_clean) < 3:
         return False
     if text_clean.lower() in ['да', 'нет', 'ага', 'угу', 'ок', 'окей', 'хорошо', 'спасибо', 'до свидания', 'н', 'д',
@@ -199,34 +192,6 @@ def is_meaningful_issue(text):
         return False
     return True
 
-def is_fake_address(text):
-    text_lower = text.lower()
-    fake_keywords = [
-        'ждем вас', 'филиал', 'вход', 'крыльцо', 'этаж', 'поднимитесь', 'подняться',
-        'принимаются', 'выезд не предусмотрен', 'марку', 'помните', 'назовите', 'продиктуйте',
-        'микроволнов', 'принтер', 'ноутбук', 'компьютер', 'телевизор', 'холодильник',
-        'стиральная', 'посудомоечная', 'кофемашина', 'пылесос', 'кондиционер',
-        'мастер перезвонит', 'заявка', 'ремонт', 'диагностика',
-        'автоответчик', 'не понял', 'с кем разговариваю',
-        'год', 'по-моему', 'очередь', 'наверное', 'переехали', 'поставили',
-        'ждем вас в филиале', 'корпус 1 дробь 1', 'зеленое крыльцо', 'со стороны широтной',
-        'целый бок', 'можно', 'привезти', 'хо', 'дисе написано', 'сервис близко',
-        'запишу номер', 'проверьте', 'подскажите', 'мастер приехал', 'выезд мастера', 'сегодня',
-        'номер телефона', 'квартира', 'дом', 'улица',
-        'на 2', 'течение 1', 'во сколько', 'подъедет', 'оформляла заявку', 'в четверг',
-        'широтная 29', 'широтную 29', 'корпус 1', 'во 2', 'микроны во 2', '1 корпус', 'корпус 1 дробь 1',
-        'широтной 29 корпус', 'широтной 29', 'м 225', 'стоит 3', '3 ?',
-        'родной 29', 'каждые 10', 'До 9', 'с 9', 'Тут 2', 'Дубль', 'заречный проезд',
-        'вот, я смотрю', 'сейчас возлесите', 'возлесите', 'лесобаза', 'лесобазе',
-        'газовиков', 'заречная', 'заречном', 'мне ближе', 'пешком', 'типа до свидания',
-        'всего доброго', 'дольше', 'привезу.', 'танца', '50 лет',
-        'плейстейшн', 'плейстайшн', 'плюстшн', 'плюс сейшн', 'playstation', 'ps4', 'ps5'
-    ]
-    for kw in fake_keywords:
-        if kw in text_lower:
-            return True
-    return False
-
 def find_street_in_text(text):
     text_lower = text.lower()
     for street in KNOWN_STREETS:
@@ -236,94 +201,6 @@ def find_street_in_text(text):
         text_clean = re.sub(r'[ьъ]', '', text_lower)
         if street_clean in text_clean:
             return street
-    return None
-
-def extract_address_smart(text):
-    text = text.strip()
-    if not text:
-        return None
-
-    def add_extra_parts(base, source_text):
-        result = base
-        korpus_match = re.search(r'корпус\s*(\d+[а-я]?)', source_text, re.IGNORECASE)
-        if korpus_match:
-            result += f", корпус {korpus_match.group(1)}"
-        podezd_match = re.search(r'подъезд\s*(\d+)', source_text, re.IGNORECASE)
-        if podezd_match:
-            result += f", подъезд {podezd_match.group(1)}"
-        etazh_match = re.search(r'этаж\s*(\d+)', source_text, re.IGNORECASE)
-        if etazh_match:
-            result += f", этаж {etazh_match.group(1)}"
-        flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', source_text, re.IGNORECASE)
-        if flat_match:
-            result += f", квартира {flat_match.group(1)}"
-        else:
-            after_house = re.search(r'\b' + re.escape(result.split(',')[0].split()[-1]) + r'\s+(\d+)\b', source_text, re.IGNORECASE)
-            if after_house:
-                result += f", квартира {after_house.group(1)}"
-        return result
-
-    street = find_street_in_text(text)
-    if street:
-        pattern = re.compile(r'(?:' + re.escape(street) + r')\s*[,.:]?\s*(\d+[а-я]?)', re.IGNORECASE)
-        match = pattern.search(text)
-        if match:
-            house = match.group(1)
-            base = f"{street} {house}"
-            return add_extra_parts(base, text)
-        else:
-            pattern2 = re.compile(r'(?:' + re.escape(street) + r')\s*[,.:]?\s*(\d+)', re.IGNORECASE)
-            match2 = pattern2.search(text)
-            if match2:
-                base = f"{street} {match2.group(1)}"
-                return add_extra_parts(base, text)
-
-    if re.search(r'\b(?:улица|ул\.?)\b', text, re.IGNORECASE):
-        m = re.search(r'\b(?:улица|ул\.?)\s*([А-Яа-я\-]+(?:\s+[А-Яа-я\-]+)*)\s*[,.]?\s*(?:дом\s*)?(\d+[а-я]?)?', text, re.IGNORECASE)
-        if m:
-            street_name = m.group(1).strip()
-            house = m.group(2)
-            if house:
-                base = f"{street_name} {house}"
-                return add_extra_parts(base, text)
-            else:
-                return street_name
-
-    patterns_with_street = [
-        r'(?:улица|ул\.?)\s*([А-Яа-я\-]+\s+\d+[а-я]?)',
-        r'([А-Яа-я\-]+\s+\d+[а-я]?)\s*(?:корпус|кв\.?|квартира)',
-        r'([А-Яа-я\-]+\s+\d+[а-я]?)\s*,\s*(?:квартира|кв\.?)\s*\d+',
-        r'(?:дом|корпус)\s*(\d+[а-я]?)',
-    ]
-    for pattern in patterns_with_street:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            part = match.group(0).strip()
-            if re.search(r'\b(playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo)\b', part, re.IGNORECASE):
-                continue
-            if not re.search(r'\b(руб|тыс|цена|стоимость)\b', part, re.IGNORECASE):
-                flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', text, re.IGNORECASE)
-                if flat_match:
-                    part += f", квартира {flat_match.group(1)}"
-                return part
-
-    simple_pattern = re.compile(r'\b([А-Яа-я]+\s+\d+[а-я]?)\b')
-    match = simple_pattern.search(text)
-    if match:
-        part = match.group(0)
-        if re.search(r'\b(playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo)\b', part, re.IGNORECASE):
-            return None
-        if not re.search(r'\b(руб|тыс|цена|стоимость)\b', part, re.IGNORECASE):
-            if not re.search(r'\b(ноутбук|компьютер|принтер|телевизор|кондиционер|холодильник|стиральн|посудомоечн|пылесос|кофемашин|микроволновк|колонка|приставка|телефон|планшет)\b', part, re.IGNORECASE):
-                flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', text, re.IGNORECASE)
-                if flat_match:
-                    part += f", квартира {flat_match.group(1)}"
-                return part
-
-    flat_match = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', text, re.IGNORECASE)
-    if flat_match:
-        return f"квартира {flat_match.group(1)}"
-
     return None
 
 # ---------- ПАРСЕРЫ ПИСЕМ ----------
@@ -364,7 +241,6 @@ def parse_craftum(body):
     if name_match:
         raw_name = name_match.group(1).strip()
         if raw_name and raw_name not in ('Телефон', 'Номер телефона'): name = raw_name
-        else: name = "не указано"
     phone_match = re.search(r'(?:Телефон|Номер телефона)\s*\n?\s*(\+?\d[\d\s\(\)\-]+)', body)
     if phone_match:
         raw_phone = phone_match.group(1).strip()
@@ -393,18 +269,13 @@ def parse_craftum(body):
     ), None
 
 def parse_site(body):
-    """Парсер заявок с сайта proftech-service (Worker/Cloudflare)."""
+    """Парсер заявок с сайта (старый формат из Web3Forms)."""
     name = "не указано"
     phone = "не указан"
     category_key = "other"
     category_display = "не указана"
     time_display = "не указано"
     problem_display = "не указано"
-    brand_display = ""
-    age_display = ""
-    price_display = ""
-
-    logger.info(f"DEBUG parse_site body[:300]={body[:300]!r}")
 
     def extract_field(field_name):
         pattern1 = re.compile(
@@ -418,15 +289,11 @@ def parse_site(body):
                 return val
         return None
 
-    # Имя
-    raw = extract_field('👤 Имя') or extract_field('Имя') or extract_field('name')
-    if raw and len(raw) >= 2 and raw.lower() not in ('телефон', 'имя', 'не указано', ''):
+    raw = extract_field('name') or extract_field('Имя')
+    if raw and len(raw) >= 2:
         name = raw
-
-    # Телефон
-    raw_phone = extract_field('📞 Телефон') or extract_field('Телефон') or extract_field('phone')
+    raw_phone = extract_field('phone') or extract_field('Телефон')
     if not raw_phone:
-        logger.info(f"Сайт: номер телефона не найден. Тело: {body[:500]!r}")
         return None
     digits = re.sub(r'\D', '', raw_phone)
     if len(digits) == 11 and digits.startswith('8'):
@@ -438,584 +305,128 @@ def parse_site(body):
     else:
         phone = raw_phone
 
-    # Категория
-    raw_cat = extract_field('📋 Категория') or extract_field('Категория') or extract_field('category')
-    if raw_cat and raw_cat.lower() not in ('не указана', ''):
+    raw_cat = extract_field('category') or extract_field('Категория')
+    if raw_cat:
         category_display = raw_cat
-        raw_cat_low = raw_cat.lower()
-        cat_map = [
-            ('компьютер', 'computers'), ('ноутбук', 'computers'), ('моноблок', 'computers'), ('пк', 'computers'),
-            ('стиральн', 'appliances'), ('посудомоечн', 'appliances'), ('плита', 'appliances'),
-            ('духовой шкаф', 'appliances'), ('варочн', 'appliances'), ('водонагревател', 'appliances'),
-            ('холодильник', 'refrigerators'),
-            ('кондиционер', 'cond'),
-            ('телевизор', 'tv'),
-            ('принтер', 'orgtech'), ('мфу', 'orgtech'), ('оргтехника', 'orgtech'),
-            ('телефон', 'phone'), ('смартфон', 'phone'), ('планшет', 'phone'),
-            ('пылесос', 'vacuum'),
-            ('микроволновк', 'microwave'),
-            ('кофемашин', 'coffee'),
-            ('колонка', 'speaker'),
-            ('приставка', 'console'), ('игровая', 'console'),
-        ]
-        for key, val in cat_map:
-            if key in raw_cat_low:
-                category_key = val
-                break
+        category_key = detect_category(raw_cat.lower())
 
-    # Удобное время
-    raw_time = extract_field('⏰ Удобное время') or extract_field('Удобное время') or extract_field('time')
-    if raw_time and raw_time.lower() not in ('не указано', ''):
+    raw_time = extract_field('time') or extract_field('Удобное время')
+    if raw_time:
         time_display = raw_time
 
-    # Неисправность
-    raw_problem = extract_field('⚙️ Неисправность') or extract_field('Неисправность') or extract_field('problem')
-    if raw_problem and raw_problem.lower() not in ('не указано', ''):
+    raw_problem = extract_field('problem') or extract_field('Неисправность')
+    if raw_problem:
         problem_display = raw_problem
 
-    # Бренд
-    raw_brand = extract_field('🏷 Бренд') or extract_field('Бренд') or extract_field('brand')
-    if raw_brand and raw_brand.lower() not in ('не указан', ''):
-        brand_display = raw_brand
-
-    # Возраст
-    raw_age = extract_field('📅 Возраст') or extract_field('Возраст') or extract_field('age')
-    if raw_age and raw_age.lower() not in ('не указан', ''):
-        age_display = raw_age
-
-    # Примерная цена
-    raw_price = extract_field('💰 Примерная цена') or extract_field('Примерная цена') or extract_field('price')
-    if raw_price:
-        price_display = raw_price
-
-    # Формируем сообщение
     message = (
         "🚨 Новая заявка (Сайт)!\n"
         f"👤 Имя: {name}\n"
         f"📞 Телефон: {phone}\n"
         f"📋 Категория: {category_display}\n"
         f"⚙️ Неисправность: {problem_display}\n"
+        f"⏰ Удобное время: {time_display}\n"
     )
-    if brand_display:
-        message += f"🏷 Бренд: {brand_display}\n"
-    if age_display:
-        message += f"📅 Возраст: {age_display}\n"
-    message += f"⏰ Удобное время: {time_display}\n"
-    if price_display:
-        message += f"💰 Примерная цена: {price_display}\n"
-
     return message, category_key
 
-# ---------- ХЕЛПЕРЫ ДЛЯ ZVONOK ----------
-ADDRESS_STOP_WORDS = {
-    'десят', 'кв', 'квартира', 'подъезд', 'этаж', 'дом', 'корпус', 'ул', 'улица',
-    'номер', 'телефон', 'мастер', 'робот', 'клиент', 'смарт', 'телевизор',
-    'холодильник', 'шкаф', 'бош', 'bosch', 'трера', 'трара', 'крера', 'не',
-    'он', 'она', 'это', 'вот', 'ну', 'да', 'нет', 'привет', 'здравствуйте',
-    'диагностика', 'ремонт', 'подключить', 'установить', 'стиральная', 'посудомоечная',
-    'микроволновка', 'кофемашина', 'пылесос', 'кондиционер', 'принтер', 'ноутбук',
-    'компьютер', 'планшет', 'телефон', 'смартфон', 'колонка', 'приставка'
-}
+# ---------- WEBHOOK: приём заявок с Cloudflare Worker ----------
+def build_message_from_json(data: dict):
+    """Собирает текст заявки и category_key из JSON, который шлёт Worker."""
+    name = data.get('name', 'не указано')
+    phone = data.get('phone', 'не указан')
+    category = data.get('category', 'не указана')
+    problem = data.get('problem', 'не указано')
+    brand = data.get('brand', '')
+    age = data.get('age', '')
+    time_val = data.get('time', 'не указано')
+    price = data.get('price', '')
+    source = data.get('source', '')
 
+    if not name or not phone:
+        return None, None
 
-def is_valid_street_name(name):
-    name = name.strip()
-    if not name or len(name) < 3:
-        return False
-    first = name.split()[0].lower()
-    if first in ADDRESS_STOP_WORDS:
-        return False
-    if re.fullmatch(r'[\d\s\-\(\)]+', name):
-        return False
-    return True
+    category_key = detect_category(category.lower()) if category else 'other'
 
+    # Форматирование телефона
+    digits = re.sub(r'\D', '', phone)
+    if len(digits) == 11 and digits.startswith('8'):
+        digits = '7' + digits[1:]
+    elif len(digits) == 10 and digits.startswith('9'):
+        digits = '7' + digits
+    if len(digits) == 11 and digits.startswith('7'):
+        phone = f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
 
-def find_streets_in_lines(lines):
-    text = ' '.join(lines)
-    found = []
-
-    for street in KNOWN_STREETS:
-        if re.search(r'\b' + re.escape(street) + r'\b', text, re.IGNORECASE):
-            found.append(street)
-
-    for m in re.finditer(r'\b(?:улица|ул\.?)\s+([А-Яа-яЁё\-]+(?:\s+[А-Яа-яЁё\-]+)?)', text, re.IGNORECASE):
-        name = m.group(1).strip()
-        if is_valid_street_name(name):
-            found.append(name)
-
-    for m in re.finditer(r'\b([А-Яа-яЁё\-]+(?:\s+[А-Яа-яЁё\-]+)?)\s+(\d+[а-я]?)\b', text):
-        name = m.group(1).strip()
-        if is_valid_street_name(name):
-            found.append(name)
-
-    seen = set()
-    unique = []
-    for s in found:
-        key = s.lower()
-        if key not in seen:
-            seen.add(key)
-            unique.append(s)
-    return unique
-
-
-def extract_address_from_dialog(client_lines, robot_lines):
-    all_text = ' '.join(client_lines + robot_lines)
-    client_streets = find_streets_in_lines(client_lines)
-    robot_streets = find_streets_in_lines(robot_lines)
-
-    street = None
-
-    for s in client_streets:
-        if s in KNOWN_STREETS:
-            street = s
-            break
-    if not street:
-        for s in robot_streets:
-            if s in KNOWN_STREETS:
-                street = s
-                break
-
-    if not street and client_streets:
-        street = client_streets[0]
-    if not street and robot_streets:
-        street = robot_streets[0]
-
-    house = None
-    if street:
-        m = re.search(
-            re.escape(street) + r'\s*[,.]?\s*(?:дом\s*)?(\d+[а-я]?)',
-            all_text, re.IGNORECASE
-        )
-        if m:
-            house = m.group(1)
-
-    if not house:
-        m = re.search(r'\bдом\s*(\d+[а-я]?)\b', all_text, re.IGNORECASE)
-        if m:
-            house = m.group(1)
-
-    if not house:
-        for m in re.finditer(r'\b([А-Яа-яЁё\-]+(?:\s+[А-Яа-яЁё\-]+)?)\s+(\d+[а-я]?)\b', all_text):
-            if is_valid_street_name(m.group(1)):
-                house = m.group(2)
-                break
-
-    flat = None
-    m = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', all_text, re.IGNORECASE)
-    if m:
-        flat = m.group(1)
-
-    pod = None
-    m = re.search(r'подъезд\s*(\d+)', all_text, re.IGNORECASE)
-    if m:
-        pod = m.group(1)
-
-    et = None
-    m = re.search(r'этаж\s*(\d+)', all_text, re.IGNORECASE)
-    if m:
-        et = m.group(1)
-
-    kor = None
-    m = re.search(r'корпус\s*(\d+[а-я]?)', all_text, re.IGNORECASE)
-    if m:
-        kor = m.group(1)
-
-    parts = []
-    if street:
-        parts.append(street)
-    if house:
-        parts.append(house)
-    if kor:
-        parts.append(f"корпус {kor}")
-    if pod:
-        parts.append(f"подъезд {pod}")
-    if et:
-        parts.append(f"этаж {et}")
-    if flat:
-        parts.append(f"квартира {flat}")
-
-    return ', '.join(parts) if parts else None
-
-
-PROBLEM_KEYWORDS = re.compile(
-    r'(не реагирует|не работает|не включается|не греет|не холодит|не морозит|не отжимает|'
-    r'не сливает|не набирает|не крутит|не открывается|не закрывается|не держит|'
-    r'дисплей|кнопк|экран|ошибк|шум|течёт|протечк|запах|искрит|выбивает|'
-    r'сломал|поломк|неисправн|диагностик|ремонт|подключ|установк|настро[йи]|'
-    r'зависает|тормозит|глючит|мигает|полосы|нет изображения|нет звука|'
-    r'не заряжается|не печатает|зажевывает|застрял|перегрев|стучит|скрипит|'
-    r'не запускается|не охлаждает|не нагревает|не показывает|не выключается|'
-    r'залипает|перегорел|не подает|не подаёт|не моет|нет холода|нет воды|'
-    r'провод|блок питания|оторвался|компрессор|подшипник|барабан|'
-    r'уплотнитель|манжет|резинк|прокладк)',
-    re.IGNORECASE
-)
-
-
-def extract_problem_from_dialog(client_lines, robot_lines):
-    summary_problems = []
-    for line in robot_lines:
-        if re.search(r'(Проверьте|Поняла|Записала|Итак|Значит|Хорошо)', line, re.IGNORECASE) \
-                and PROBLEM_KEYWORDS.search(line):
-            line_clean = re.sub(
-                r'^(Проверьте|Поняла|Записала|Итак|Значит|Хорошо)[:,]?\s*',
-                '', line, flags=re.IGNORECASE
-            )
-            line_clean = re.sub(
-                r'\b(адрес|улица|дом|квартира|телефон|номер|подъезд|этаж)\b.*',
-                '', line_clean, flags=re.IGNORECASE
-            ).strip(' ,.')
-            line_clean = re.sub(
-                r'^(телевизор|холодильник|стиральная|посудомоечная|микроволновка|'
-                r'кофемашина|пылесос|кондиционер|принтер|ноутбук|компьютер|'
-                r'духовой шкаф|плита|телефон|планшет|колонка|приставка)[,:]?\s*',
-                '', line_clean, flags=re.IGNORECASE
-            ).strip(' ,.')
-            if line_clean and len(line_clean) >= 5:
-                summary_problems.append(line_clean)
-
-    if summary_problems:
-        best = summary_problems[-1]
-        return best[:120] + ('...' if len(best) > 120 else '')
-
-    candidates = []
-    for line in client_lines:
-        if is_price_question(line):
-            continue
-        if not is_meaningful_issue(line):
-            continue
-        if PROBLEM_KEYWORDS.search(line):
-            candidates.append(line.strip())
-
-    if not candidates:
-        return "не указана"
-
-    def score(s):
-        return len(PROBLEM_KEYWORDS.findall(s))
-
-    best = max(candidates, key=score)
-    return best[:120] + ('...' if len(best) > 120 else '')
-
-
-# ---------- ОСНОВНАЯ ФУНКЦИЯ ПАРСИНГА ZVONOK ----------
-def parse_zvonok(body):
-    phone = "не указан"
-    header_phone_match = re.search(r'Телефон:\s*([+\d\s]+)', body)
-    header_phone = header_phone_match.group(1).strip() if header_phone_match else None
-
-    all_phones = re.findall(r'(\+?\d[\d\s\-]{5,})', body)
-    last_transcript_phone = None
-    if all_phones:
-        for p in reversed(all_phones):
-            digits = re.sub(r'\D', '', p)
-            if len(digits) >= 10:
-                last_transcript_phone = digits
-                break
-
-    if last_transcript_phone and len(last_transcript_phone) > 11:
-        last_transcript_phone = None
-
-    if last_transcript_phone:
-        phone = last_transcript_phone
-    else:
-        phone = header_phone if header_phone else "не указан"
-    if phone != "не указан":
-        digits = re.sub(r'\D', '', phone)
-        if len(digits) == 11 and digits.startswith('8'):
-            digits = '7' + digits[1:]
-        elif len(digits) == 10 and digits.startswith('9'):
-            digits = '7' + digits
-        if len(digits) == 11 and digits.startswith('7'):
-            phone = f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
-        else:
-            phone = digits
-
-    if "{ct_transcribing}" in body or "Разговор:" not in body:
-        return (
-            "🚨 Новая заявка (Zvonok)!\n"
-            f"📞 Телефон: {phone}\n"
-            f"⚠️ Разговор не распознан или прерван\n"
-        ), "other"
-
-    client_lines = re.findall(r"'client'.*?'text':\s*'([^']*)'", body)
-    robot_lines = re.findall(r"'robot'.*?'text':\s*'([^']*)'", body)
-
-    if not client_lines and not robot_lines:
-        talk_match = re.search(r'Разговор:\s*(.*?)(?:\n\n|$)', body, re.DOTALL)
-        if talk_match:
-            talk_text = talk_match.group(1)
-            lines = talk_text.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line.startswith('Робот:'):
-                    robot_lines.append(line.replace('Робот:', '').strip())
-                elif line.startswith('Клиент:'):
-                    client_lines.append(line.replace('Клиент:', '').strip())
-                elif re.match(r'^Робот\s*:', line):
-                    robot_lines.append(re.sub(r'^Робот\s*:', '', line).strip())
-                elif re.match(r'^Клиент\s*:', line):
-                    client_lines.append(re.sub(r'^Клиент\s*:', '', line).strip())
-        if not client_lines and not robot_lines:
-            robot_matches = re.findall(r'Робот\s*:\s*(.*?)(?=\s*(?:Робот|Клиент|$))', body, re.DOTALL)
-            client_matches = re.findall(r'Клиент\s*:\s*(.*?)(?=\s*(?:Робот|Клиент|$))', body, re.DOTALL)
-            robot_lines = [m.strip() for m in robot_matches]
-            client_lines = [m.strip() for m in client_matches]
-
-    if not client_lines:
-        return (
-            "🚨 Новая заявка (Zvonok)!\n"
-            f"📞 Телефон: {phone}\n"
-            f"⚠️ Не удалось извлечь реплики клиента\n"
-        ), "other"
-
-    refusal_phrases = re.compile(
-        r'(не ремонтируем|не занимаемся|только целиком|платы мы не ремонтируем|'
-        r'не входит|не в наши услуги|слесарными работами|открутить|гайку|'
-        r'не занимаемся такими работами|это не наш профиль|'
-        r'мы не ремонтируем|не входит в нашу специализацию|мы не делаем|'
-        r'к сожалению, не ремонтируем|не обслуживаем|'
-        r'стройкой мы не занимаемся|сейчас мы не занимаемся|'
-        r'настройкой не занимаемся|не сможем помочь|не подскажем|'
-        r'только ремонт|ремонтом занимаемся|не ремонтируем такие|'
-        r'не принимаем такие|не работаем с такими|'
-        r'не чин)'
-    )
-    if any(refusal_phrases.search(r) for r in robot_lines):
-        logger.info("Заявка отклонена (отказная фраза робота)")
-        return None
-
-    warranty_phrases = re.compile(r'(гарантия|гарантийный случай|мастер уже был|по гарантии)', re.IGNORECASE)
-    is_warranty = any(warranty_phrases.search(line) for line in client_lines + robot_lines)
-
-    category_key = "other"
-    brand = "не указано"
-    problem = "не указано"
-    address = "не указано"
-    time = "не указано"
-
-    client_text = ' '.join(client_lines)
-    client_text_lower = client_text.lower()
-    all_text = client_text + ' ' + ' '.join(robot_lines)
-    all_text_lower = all_text.lower()
-
-    def detect_category_from_text(text_lower):
-        if re.search(r'(игровая приставка|приставка|playstation|плейстейшн|плейстайшн|плюстшн|плюс сейшн|ps4|ps5|xbox|nintendo|джойстик|геймпад|игровая штука|игровая)', text_lower):
-            return "console"
-        elif re.search(r'(ноутбук|компьютер|моноблок|системный блок|системник|ноут|комп|монитор)', text_lower):
-            return "computers"
-        elif re.search(r'(принтер|мфу|сканер|копир|оргтехника|лазерджет|мфус|мпф|мфу-сканер|копировальный аппарат)', text_lower):
-            return "orgtech"
-        elif re.search(r'(кондиционер|сплит|сплит-система|чистка кондиционера|заправка кондиционера)', text_lower):
-            return "cond"
-        elif re.search(r'(холодильник|морозильник|морозил)', text_lower):
-            return "refrigerators"
-        elif re.search(r'(стиральн|посудомоечн|плит|духов|варочн|водонагревател(ь)?|духовой шкаф|прокладка|уплотнительн|резинк|манжет)', text_lower):
-            return "appliances"
-        elif re.search(r'(телевизор|(?<![\w])тв(?![\w])|плазма|телек)', text_lower):
-            return "tv"
-        elif re.search(r'(телефон|смартфон|айфон|iphone|андроид|мобильник|планшет|электронная книга|онор|honor|технопол|tecno|техно)', text_lower):
-            return "phone"
-        elif re.search(r'(пылесос|робот-пылесос|моющий пылесос)', text_lower):
-            return "vacuum"
-        elif re.search(r'(микроволновк|свч|микроволновая печь)', text_lower):
-            return "microwave"
-        elif re.search(r'(кофемашин|кофеварк|кофе-машин|кофейный аппарат)', text_lower):
-            return "coffee"
-        elif re.search(r'(колонка|умная колонка|алиса|маруся|sberbox|яндекс станция|яндекс колонка)', text_lower):
-            return "speaker"
-        return None
-
-    category_key = detect_category_from_text(client_text_lower)
-    if category_key is None:
-        category_key = detect_category_from_text(all_text_lower)
-    if category_key is None:
-        category_key = "other"
-
-    brand_aliases = {
-        'хаер': 'Haier', 'haier': 'Haier', 'хайр': 'Haier',
-        'аристон': 'Ariston', 'ariston': 'Ariston',
-        'bosch': 'Bosch', 'бош': 'Bosch', 'бось': 'Bosch',
-        'samsung': 'Samsung', 'самсун': 'Samsung',
-        'lg': 'LG', 'элджи': 'LG', 'элжи': 'LG', 'эл джи': 'LG',
-        'оджи': 'LG', 'олджи': 'LG',
-        'indesit': 'Indesit', 'индезит': 'Indesit', 'индивидит': 'Indesit',
-        'whirlpool': 'Whirlpool', 'electrolux': 'Electrolux', 'электролюкс': 'Electrolux',
-        'хисенс': 'Hisense', 'hisense': 'Hisense',
-        'beko': 'Beko', 'беко': 'Beko', 'бэко': 'Beko',
-        'zanussi': 'Zanussi', 'заной': 'Zanussi',
-        'hotpoint': 'Hotpoint',
-        'siemens': 'Siemens', 'miele': 'Miele', 'gorenje': 'Gorenje',
-        'горение': 'Gorenje',
-        'liebherr': 'Liebherr', 'sharp': 'Sharp', 'panasonic': 'Panasonic',
-        'toshiba': 'Toshiba', 'тошиба': 'Toshiba', 'тощи': 'Toshiba', 'танца': 'Toshiba',
-        'hitachi': 'Hitachi', 'mitsubishi': 'Mitsubishi',
-        'мицубиши': 'Mitsubishi', 'митсубиши': 'Mitsubishi',
-        'york': 'York', 'daewoo': 'Daewoo',
-        'hyundai': 'Hyundai', 'хундай': 'Hyundai', 'хун': 'Hyundai',
-        'vitek': 'Vitek', 'redmond': 'Redmond', 'tefal': 'Tefal',
-        'асус': 'Asus', 'asus': 'Asus', 'асины': 'Asus',
-        'acer': 'Acer', 'lenovo': 'Lenovo',
-        'hp': 'HP', 'эйчпи': 'HP', 'хп': 'HP',
-        'dell': 'Dell',
-        'хонор': 'Honor', 'honor': 'Honor', 'онор': 'Honor',
-        'аско': 'Asko', 'asko': 'Asko',
-        'макбук': 'MacBook', 'macbook': 'MacBook',
-        'люкс': 'Lux', 'lux': 'Lux',
-        'пропус': 'Prolux', 'prolux': 'Prolux',
-        'эпсон': 'Epson', 'epson': 'Epson',
-        'грюндик': 'Grundig', 'grundig': 'Grundig', 'грандиг': 'Grundig',
-        'асустуф': 'Asus TUF', 'асус туф': 'Asus TUF',
-        'дриме': 'Dreame', 'dreame': 'Dreame',
-        'дект': 'Daikin', 'daikin': 'Daikin',
-        'катана': 'MSI Katana', 'msi': 'MSI',
-        'сиоми': 'Xiaomi', 'xiaomi': 'Xiaomi',
-        'бирбса': 'Biryusa', 'biryusa': 'Biryusa',
-        'кенди': 'Candy', 'candy': 'Candy',
-        'лазерджет': 'HP LaserJet', 'лазарджет': 'HP LaserJet',
-        'дольше': "De'Longhi", 'делонги': "De'Longhi",
-        'днс': 'DNS', 'dns': 'DNS',
-        'технопол': 'Tecno', 'tecno': 'Tecno', 'техно': 'Tecno',
-        'киви': 'KIVI', 'kivi': 'KIVI',
-        'вестель': 'Vestel', 'вестел': 'Vestel', 'vestel': 'Vestel',
-        'плейстейшн': 'PlayStation', 'плейстайшн': 'PlayStation',
-        'плюстшн': 'PlayStation', 'плюс сейшн': 'PlayStation',
-        'playstation': 'PlayStation', 'ps4': 'PlayStation 4', 'ps5': 'PlayStation 5',
-        'xbox': 'Xbox', 'nintendo': 'Nintendo',
-        'трера': 'Terra', 'трара': 'Terra', 'крера': 'Terra', 'тера': 'Terra',
-    }
-
-    found_brand = None
-    for line in client_lines:
-        line_lower = line.lower()
-        for alias, canonical in brand_aliases.items():
-            if alias in line_lower:
-                found_brand = canonical
-                break
-        if found_brand:
-            break
-
-    client_says_unknown_brand = re.search(
-        r'(самостоятельно собранн|самодельн|не помню|не знаю|марку не помню|марку не знаю|свой сбор)',
-        client_text_lower
-    )
-    if not found_brand and not client_says_unknown_brand:
-        for alias, canonical in brand_aliases.items():
-            if alias in all_text_lower:
-                found_brand = canonical
-                break
-
-    if found_brand:
-        brand = found_brand
-    else:
-        known_brands = [
-            'lg', 'samsung', 'bosch', 'indesit', 'whirlpool', 'electrolux', 'haier', 'sharp',
-            'panasonic', 'tcl', 'lenovo', 'hp', 'canon', 'epson', 'xerox', 'kyocera', 'brother',
-            'ricoh', 'dell', 'acer', 'asus', 'msi', 'gigabyte', 'huawei', 'xiaomi', 'meizu',
-            'sony', 'philips', 'thomson', 'jvc', 'akai', 'york', 'mitsubishi', 'toshiba',
-            'sanyo', 'hitachi', 'fujitsu', 'nec', 'siemens', 'aeg', 'zanussi', 'ardes',
-            'candy', 'hoover', 'beko', 'vitek', 'redmond', 'tefal', 'moulinex', 'kitchenaid',
-            'smeg', 'de\'longhi', 'gorenje', 'liebherr', 'kaiser', 'miele', 'ariete',
-            'clatronic', 'exq', 'gaggia', 'saeco', 'krups', 'nespresso', 'dolce gusto',
-            'bork', 'kiv', 'midea', 'hisense', 'хисенс', 'hyundai', 'daewoo', 'rowenta',
-            'grundig', 'loewe', 'bang & olufsen', 'аристон', 'ariston', 'hotpoint', 'саратов',
-            'honor', 'онор', 'tecno', 'технопол', 'техно', 'kivi', 'киви', 'бош', 'элджи',
-            'элжи', 'эл джи', 'оджи', 'олджи', 'беко', 'бэко', 'вестель', 'вестел', 'vestel',
-            'terra', 'трера', 'трара', 'крера'
-        ]
-        text_for_brand = client_text_lower if client_text_lower.strip() else all_text_lower
-        if category_key != "other":
-            for word in CATEGORY_NAMES.get(category_key, '').split():
-                if len(word) > 2:
-                    text_for_brand = re.sub(r'\b' + re.escape(word) + r'\b', '', text_for_brand)
-        text_for_brand = re.sub(
-            r'\b(ремонт|заявка|машина|холодильник|плита|телевизор|кондиционер|ноутбук|'
-            r'компьютер|принтер|неисправность|поломка|сломался|сломалась|не работает|'
-            r'не включается|шумит|течёт|морозит|холодит|греет|отжимает|сливает|'
-            r'крутит|сушит|вращается|держится|охлаждает)\b',
-            '', text_for_brand
-        )
-
-        for b in known_brands:
-            if b in text_for_brand:
-                if b.lower() in brand_aliases:
-                    brand = brand_aliases[b.lower()]
-                else:
-                    brand = b
-                break
-
-    # --- НЕИСПРАВНОСТЬ (из диалога) ---
-    final_problem = extract_problem_from_dialog(client_lines, robot_lines)
-
-    # --- АДРЕС (из диалога) ---
-    address = extract_address_from_dialog(client_lines, robot_lines)
-
-    if not address:
-        if re.search(
-            r'(ждем вас|принимаем только в филиале|филиал|находимся на|ждем вас на|'
-            r'привозите к нам|в филиал)',
-            all_text_lower
-        ):
-            address = "филиал (привоз)"
-        else:
-            address = "не указано"
-
-    filial_categories = ["vacuum", "microwave", "coffee", "phone", "speaker", "console"]
-    if category_key in filial_categories and address != "не указано" and "широтная" in address.lower():
-        address = "филиал (привоз)"
-
-    if final_problem == "не указана" and address == "не указано":
-        logger.info("Нет ни проблемы, ни адреса – заявка отклонена")
-        return None
-
-    problem = final_problem
-
-    time = "не указано"
-    time_patterns = [
-        r'(с\s*(\d{1,2})\s*(?:до|по)\s*(\d{1,2})\s*(?:часов?|ч\.?))',
-        r'(в\s*(\d{1,2})\s*(?:часов?|ч\.?))',
-        r'(после\s*(\d{1,2})\s*(?:часов?|ч\.?))',
-        r'(утром|днём|вечером|ночью|сегодня|завтра|послезавтра)',
-        r'(\d{1,2}\s*[:-]\s*\d{2})',
-        r'(в\s*(\d{1,2})\s*(?:часов?|ч\.?)\s*(?:утра|дня|вечера))',
-    ]
-    for line in client_lines:
-        line_lower = line.lower()
-        for pattern in time_patterns:
-            m = re.search(pattern, line_lower)
-            if m:
-                time = m.group(0).strip()
-                break
-        if time != "не указано":
-            break
-    if time == "не указано":
-        for line in robot_lines:
-            line_lower = line.lower()
-            if re.search(r'(время|выезд|приедет|подъедет)', line_lower):
-                for pattern in time_patterns:
-                    m = re.search(pattern, line_lower)
-                    if m:
-                        time = m.group(0).strip()
-                        break
-                if time != "не указано":
-                    break
-
-    category_display = CATEGORY_NAMES.get(category_key, "другое")
-    message = (
-        "🚨 Новая заявка (Zvonok)!\n"
-        + ("⚠️ Гарантийный случай\n" if is_warranty else "") +
-        f"📋 Категория: {category_display}\n"
-        f"🏣 Марка: {brand}\n"
-        f"⚙️ Неисправность: {problem}\n"
-        f"📭 Адрес: {address}\n"
+    text = (
+        "🚨 Новая заявка (Сайт)!\n"
+        f"👤 Имя: {name}\n"
         f"📞 Телефон: {phone}\n"
-        f"🕒 Время: {time}\n"
+        f"📋 Категория: {category}\n"
+        f"⚙️ Неисправность: {problem}\n"
     )
-    return message, category_key
+    if brand:
+        text += f"🏷 Бренд: {brand}\n"
+    if age:
+        text += f"📅 Возраст: {age}\n"
+    text += f"⏰ Удобное время: {time_val}\n"
+    if price:
+        try:
+            price_num = int(float(price))
+            text += f"💰 Примерная цена: от {price_num:,} ₽\n".replace(',', ' ')
+        except (ValueError, TypeError):
+            text += f"💰 Примерная цена: {price}\n"
+    if source:
+        text += f"🌐 Источник: {source}\n"
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ ----------
+    return text, category_key
+
+
+async def handle_webhook(request):
+    """Принимает POST от Cloudflare Worker."""
+    try:
+        data = await request.json()
+        logger.info(f"WEBHOOK получен: {data}")
+
+        text, category_key = build_message_from_json(data)
+        if not text:
+            return web.json_response({'success': False, 'error': 'name и phone обязательны'}, status=400)
+
+        # Дедупликация по телефону
+        phone_match = re.search(r'📞 Телефон:\s*(.+)', text)
+        if phone_match:
+            digits = re.sub(r'\D', '', phone_match.group(1))
+            now = datetime.now()
+            if digits in recent_phones and (now - recent_phones[digits]) < timedelta(hours=1):
+                logger.info("WEBHOOK: заявка отклонена (дубликат телефона)")
+                return web.json_response({'success': True, 'skipped': 'duplicate'})
+            recent_phones[digits] = now
+
+        # Отправляем в GENERAL_GROUP и рассылаем по группам
+        asyncio.create_task(send_and_dispatch(text, category_key))
+
+        return web.json_response({'success': True})
+    except Exception as e:
+        logger.error(f"WEBHOOK error: {e}", exc_info=True)
+        return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+
+async def handle_health(request):
+    return web.json_response({'status': 'ok', 'service': 'dispatcher-bot'})
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_post('/webhook', handle_webhook)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEBHOOK_PORT)
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на 0.0.0.0:{WEBHOOK_PORT}")
+
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ----------
 def detect_category(text: str) -> str:
     t = text.lower()
-    if any(w in t for w in ["виндовс", "установить", "ноутбук", "компьютер", "моноблок", "системный блок", "монитор"]):
+    if any(w in t for w in ["виндовс", "установить", "ноутбук", "компьютер", "моноблок", "системный блок", "монитор", "пк", "залили"]):
         return "computers"
     if any(w in t for w in ["принтер", "мфу", "сканер", "копир", "факс", "плоттер", "оргтехника", "лазерджет", "мфус"]):
         return "orgtech"
@@ -1277,27 +688,21 @@ def _imap_task():
                                 elif is_site:
                                     parsed = parse_site(body)
                                     if parsed is None:
-                                        logger.info("Заявка с сайта не распарсена, пропускаем")
                                         continue
                                     final_text, category_key = parsed
                                 elif "bothelp.io" in sender.lower() or "bothelp.io" in body.lower():
                                     parsed = parse_bothelp(body)
                                     if parsed is None:
-                                        logger.info("Заявка BotHelp без телефона, пропускаем")
                                         continue
                                     final_text, category_key = parsed
                                 elif "craftum.org" in sender.lower() or "craftum.org" in body.lower():
                                     parsed = parse_craftum(body)
                                     if parsed is None:
-                                        logger.info("Заявка Craftum без телефона, пропускаем")
                                         continue
                                     final_text, category_key = parsed
                                 else:
-                                    logger.info(f"Письмо от {sender} не относится к Zvonok/BotHelp/Craftum/Сайт, пропускаем")
                                     continue
-                                logger.info(f"DEBUG: final_text = {final_text[:150]}")
                                 if any(term in final_text.lower() for term in EXCLUDED_TECH):
-                                    logger.info("заявка отклонена (исключённая техника)")
                                     continue
                                 phone_match = re.search(r'📞 Телефон:\s*(.+)', final_text)
                                 if not phone_match:
@@ -1308,16 +713,12 @@ def _imap_task():
                                     if len(digits) >= 10:
                                         now = datetime.now()
                                         if digits in recent_phones and (now - recent_phones[digits]) < timedelta(hours=1):
-                                            logger.info("заявка отклонена (дубликат телефона)")
                                             continue
                                         recent_phones[digits] = now
-                                logger.info("вызываю asyncio.run_coroutine_threadsafe...")
                                 try:
                                     asyncio.run_coroutine_threadsafe(send_and_dispatch(final_text, category_key), main_loop)
                                 except Exception as e:
                                     logger.error(f"run_coroutine_threadsafe: {e}")
-                            else:
-                                logger.info("Письмо без тела, пропускаем")
                     mail.store(num, '+FLAGS', '\\Seen')
                 except Exception as e:
                     logger.error(f"Ошибка обработки письма {num}: {e}")
@@ -1363,6 +764,7 @@ async def main():
     await application.initialize()
     await application.start()
     asyncio.create_task(poll_mail())
+    asyncio.create_task(start_web_server())
     await application.updater.start_polling(
         poll_interval=0.5,
         drop_pending_updates=True,
