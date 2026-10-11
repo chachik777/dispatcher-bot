@@ -82,11 +82,11 @@ def retry_sync(max_retries=10, delay=5, backoff=2, exceptions=(Exception,)):
     return decorator
 
 # ---------- КОНФИГУРАЦИЯ ----------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8964018097:AAHiQfOwTnwWeVQWUog5vhihmk8lfcDLA74")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 GENERAL_GROUP = int(os.getenv("GENERAL_GROUP", "-1003896694214"))
 
-EMAIL = os.getenv("EMAIL", "dir72.pk@mail.ru")
-PASSWORD = os.getenv("PASSWORD", "afStBLqMmNzQtZNkc0Mv")
+EMAIL = os.getenv("EMAIL")
+PASSWORD = os.getenv("PASSWORD")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
 WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
@@ -328,6 +328,100 @@ def parse_site(body):
     )
     return message, category_key
 
+
+# ---------- ПАРСЕР ЗВОНКОВ (zvonok.com) ----------
+# Фразы робота/клиента, при которых заявка НЕ берётся в работу
+ZVONOK_REFUSAL_PATTERNS = [
+    # Робот: техника не нашего профиля
+    r'это\s+не\s+та\s+техника',
+    r'не\s+та\s+техника',
+    r'не\s+ремонтируем',
+    r'не\s+занимаемся\s+ремонтом',
+    r'не\s+входит\s+в\s+наш',
+    r'не\s+наш\s+профиль',
+    r'мы\s+специализируемся\s+на',
+    r'это\s+мелкая\s+техника',       # пылесосы, фены и т.п. — не выезжаем
+    r'принимаем\s+только\s+в\s+филиале',
+    r'выезд\s+мастера\s+не\s+предусмотрен',
+    # Клиент: отказывается
+    r'\bне\s+надо\b',
+    r'\bне\s+нужно\b',
+    r'\bне\s+интерес(но|ует)\b',
+    r'\bне\s+хочу\b',
+    r'\bотказ(ыв)?аюсь\b',
+    r'\bперезвон(ите|ю)\s+позже\b',
+    r'\bпозже\s+перезвон',
+    r'\bя\s+уже\s+(починил|наш[её]л|сделал|решил)',
+    r'\bуже\s+не\s+актуально\b',
+    r'\bне\s+актуально\b',
+    r'\bвс[её]\s+спасибо\b',
+    r'\bдо\s+свидания\b',
+    r'\bотстаньте\b',
+    r'\bне\s+звоните\b',
+    r'\bошиб(ка|ся|лись)\b',
+    r'\bне\s+могу\s+говорить\b',
+    r'\bзанят[аы]?\b',
+    r'\bперезвоните\s+потом\b',
+    # Робот: клиент положил трубку / не отвечает
+    r'\bалло\b\s*\.?\s*$',            # если клиент сказал только "Алло"
+]
+
+def parse_zvonok(body):
+    """Парсер заявок от zvonok.com (робот-обзвон 'Эльвира')."""
+    # ---- Телефон ----
+    m = re.search(r'^phone:\s*(\+?\d[\d\s\-]{9,})', body, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        m = re.search(r'^Телефон:\s*(\+?\d[\d\s\-]{9,})', body, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        logger.info("Zvonok: телефон не найден, заявка пропущена")
+        return None
+
+    raw_phone = m.group(1).strip()
+    digits = re.sub(r'\D', '', raw_phone)
+    if len(digits) == 11 and digits.startswith('8'):
+        digits = '7' + digits[1:]
+    elif len(digits) == 10 and digits.startswith('9'):
+        digits = '7' + digits
+    if len(digits) == 11 and digits.startswith('7'):
+        phone = f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    else:
+        phone = raw_phone
+
+    # ---- Проверка на отказ (по всему тексту разговора) ----
+    for pattern in ZVONOK_REFUSAL_PATTERNS:
+        if re.search(pattern, body, re.IGNORECASE | re.MULTILINE):
+            logger.info(f"Zvonok: отказ по паттерну '{pattern}', заявка пропущена")
+            return None
+
+    # ---- Реплики клиента ----
+    client_phrases = [p.strip() for p in re.findall(r'Клиент:\s*([^\n]+)', body) if p.strip()]
+    if not client_phrases:
+        logger.info("Zvonok: клиент ничего не сказал, заявка пропущена")
+        return None
+
+    client_text = ' '.join(client_phrases)
+    cleaned = clean_text(client_text)
+
+    if not cleaned or not is_meaningful_issue(cleaned):
+        logger.info(f"Zvonok: неосмысленный текст ('{cleaned}'), заявка пропущена")
+        return None
+
+    # ---- Категория ----
+    category_key = detect_category(client_text)
+
+    # Если категория не определилась и осталась "other", но в тексте робота
+    # явно упоминается тип техники — попробуем по полному тексту
+    if category_key == "other":
+        category_key = detect_category(body)
+
+    text = (
+        "🚨 Новая заявка (Звонок)!\n"
+        f"📞 Телефон: {phone}\n"
+        f"💬 Проблема: {cleaned}\n"
+    )
+    return text, category_key
+
+
 # ---------- WEBHOOK: приём заявок с Cloudflare Worker ----------
 def build_message_from_json(data: dict):
     """Собирает текст заявки и category_key из JSON, который шлёт Worker."""
@@ -346,7 +440,6 @@ def build_message_from_json(data: dict):
 
     category_key = detect_category(category.lower()) if category else 'other'
 
-    # Форматирование телефона
     digits = re.sub(r'\D', '', phone)
     if len(digits) == 11 and digits.startswith('8'):
         digits = '7' + digits[1:]
@@ -389,7 +482,6 @@ async def handle_webhook(request):
         if not text:
             return web.json_response({'success': False, 'error': 'name и phone обязательны'}, status=400)
 
-        # Дедупликация по телефону
         phone_match = re.search(r'📞 Телефон:\s*(.+)', text)
         if phone_match:
             digits = re.sub(r'\D', '', phone_match.group(1))
@@ -399,7 +491,6 @@ async def handle_webhook(request):
                 return web.json_response({'success': True, 'skipped': 'duplicate'})
             recent_phones[digits] = now
 
-        # Отправляем в GENERAL_GROUP и рассылаем по группам
         asyncio.create_task(send_and_dispatch(text, category_key))
 
         return web.json_response({'success': True})
@@ -423,7 +514,7 @@ async def start_web_server():
     await site.start()
     logger.info(f"HTTP-сервер запущен на 0.0.0.0:{WEBHOOK_PORT}")
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ----------
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ ----------
 def detect_category(text: str) -> str:
     t = text.lower()
     if any(w in t for w in ["виндовс", "установить", "ноутбук", "компьютер", "моноблок", "системный блок", "монитор", "пк", "залили"]):
@@ -643,7 +734,8 @@ EXCLUDED_TECH = [
     'фитнес-браслет', 'роутер', 'модем', 'пульт ду', 'пульта ду', 'внешний аккумулятор', 'флешка',
     'карта памяти', 'заправка картриджа', 'заправить картридж', 'припаять проводок', 'заменить вилку',
     'настроить wi-fi', 'восстановить данные с флешки', 'газовая плита', 'газовой плиты',
-    'газовый котел', 'водонагреватель', 'теплый пол', 'домофон', 'система видеонаблюдения', 'автомагнитола'
+    'газовый котел', 'водонагреватель', 'теплый пол', 'домофон', 'система видеонаблюдения', 'автомагнитола',
+    'фотоаппарат', 'фотоаппарата', 'фотоаппаратом', 'фотовспышка', 'фото вспышка', 'зеркалка', 'объектив',
 ]
 
 @retry_sync(max_retries=10, delay=5, backoff=2, exceptions=(socket.gaierror, socket.timeout, ConnectionError))
