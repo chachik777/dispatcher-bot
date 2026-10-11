@@ -123,6 +123,9 @@ CATEGORY_NAMES = {
     "other": "другое"
 }
 
+# Категории, которые принимаются только в филиале (привоз)
+FILIAL_CATEGORIES = {"vacuum", "microwave", "coffee", "speaker", "console", "phone"}
+
 active_requests = {}
 recent_phones = {}
 main_loop = None
@@ -329,42 +332,205 @@ def parse_site(body):
     return message, category_key
 
 
-# ---------- ПАРСЕР ЗВОНКОВ (zvonok.com) ----------
-# Фразы робота/клиента, при которых заявка НЕ берётся в работу
-ZVONOK_REFUSAL_PATTERNS = [
-    # Робот: техника не нашего профиля
+# ---------- ХЕЛПЕРЫ ДЛЯ ZVONOK ----------
+ADDRESS_STOP_WORDS = {
+    'десят', 'кв', 'квартира', 'подъезд', 'этаж', 'дом', 'корпус', 'ул', 'улица',
+    'номер', 'телефон', 'мастер', 'робот', 'клиент', 'смарт', 'телевизор',
+    'холодильник', 'шкаф', 'бош', 'bosch', 'трера', 'трара', 'крера', 'не',
+    'он', 'она', 'это', 'вот', 'ну', 'да', 'нет', 'привет', 'здравствуйте',
+    'диагностика', 'ремонт', 'подключить', 'установить', 'стиральная', 'посудомоечная',
+    'микроволновка', 'кофемашина', 'пылесос', 'кондиционер', 'принтер', 'ноутбук',
+    'компьютер', 'планшет', 'телефон', 'смартфон', 'колонка', 'приставка'
+}
+
+def is_valid_street_name(name):
+    name = name.strip()
+    if not name or len(name) < 3:
+        return False
+    first = name.split()[0].lower()
+    if first in ADDRESS_STOP_WORDS:
+        return False
+    if re.fullmatch(r'[\d\s\-\(\)]+', name):
+        return False
+    return True
+
+def find_streets_in_lines(lines):
+    text = ' '.join(lines)
+    found = []
+    for street in KNOWN_STREETS:
+        if re.search(r'\b' + re.escape(street) + r'\b', text, re.IGNORECASE):
+            found.append(street)
+    for m in re.finditer(r'\b(?:улица|ул\.?)\s+([А-Яа-яЁё\-]+(?:\s+[А-Яа-яЁё\-]+)?)', text, re.IGNORECASE):
+        name = m.group(1).strip()
+        if is_valid_street_name(name):
+            found.append(name)
+    for m in re.finditer(r'\b([А-Яа-яЁё\-]+(?:\s+[А-Яа-яЁё\-]+)?)\s+(\d+[а-я]?)\b', text):
+        name = m.group(1).strip()
+        if is_valid_street_name(name):
+            found.append(name)
+    seen = set()
+    unique = []
+    for s in found:
+        key = s.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+    return unique
+
+def extract_address_from_dialog(client_lines, robot_lines):
+    all_text = ' '.join(client_lines + robot_lines)
+    client_streets = find_streets_in_lines(client_lines)
+    robot_streets = find_streets_in_lines(robot_lines)
+    street = None
+    for s in client_streets:
+        if s in KNOWN_STREETS:
+            street = s
+            break
+    if not street:
+        for s in robot_streets:
+            if s in KNOWN_STREETS:
+                street = s
+                break
+    if not street and client_streets:
+        street = client_streets[0]
+    if not street and robot_streets:
+        street = robot_streets[0]
+    house = None
+    if street:
+        m = re.search(
+            re.escape(street) + r'\s*[,.]?\s*(?:дом\s*)?(\d+[а-я]?)',
+            all_text, re.IGNORECASE
+        )
+        if m:
+            house = m.group(1)
+    if not house:
+        m = re.search(r'\bдом\s*(\d+[а-я]?)\b', all_text, re.IGNORECASE)
+        if m:
+            house = m.group(1)
+    if not house:
+        for m in re.finditer(r'\b([А-Яа-яЁё\-]+(?:\s+[А-Яа-яЁё\-]+)?)\s+(\d+[а-я]?)\b', all_text):
+            if is_valid_street_name(m.group(1)):
+                house = m.group(2)
+                break
+    flat = None
+    m = re.search(r'(?:квартира|кв\.?)\s*(\d+[а-я]?)', all_text, re.IGNORECASE)
+    if m:
+        flat = m.group(1)
+    pod = None
+    m = re.search(r'подъезд\s*(\d+)', all_text, re.IGNORECASE)
+    if m:
+        pod = m.group(1)
+    et = None
+    m = re.search(r'этаж\s*(\d+)', all_text, re.IGNORECASE)
+    if m:
+        et = m.group(1)
+    kor = None
+    m = re.search(r'корпус\s*(\d+[а-я]?)', all_text, re.IGNORECASE)
+    if m:
+        kor = m.group(1)
+    parts = []
+    if street:
+        parts.append(street)
+    if house:
+        parts.append(house)
+    if kor:
+        parts.append(f"корпус {kor}")
+    if pod:
+        parts.append(f"подъезд {pod}")
+    if et:
+        parts.append(f"этаж {et}")
+    if flat:
+        parts.append(f"квартира {flat}")
+    return ', '.join(parts) if parts else None
+
+
+PROBLEM_KEYWORDS = re.compile(
+    r'(не реагирует|не работает|не включается|не греет|не холодит|не морозит|не отжимает|'
+    r'не сливает|не набирает|не крутит|не открывается|не закрывается|не держит|'
+    r'дисплей|кнопк|экран|ошибк|шум|течёт|протечк|запах|искрит|выбивает|'
+    r'сломал|поломк|неисправн|диагностик|ремонт|подключ|установк|настро[йи]|'
+    r'зависает|тормозит|глючит|мигает|полосы|нет изображения|нет звука|'
+    r'не заряжается|не печатает|зажевывает|застрял|перегрев|стучит|скрипит|'
+    r'не запускается|не охлаждает|не нагревает|не показывает|не выключается|'
+    r'залипает|перегорел|не подает|не подаёт|не моет|нет холода|нет воды|'
+    r'провод|блок питания|оторвался|компрессор|подшипник|барабан|'
+    r'уплотнитель|манжет|резинк|прокладк|перестал|перестала|сломался|сломалась|'
+    r'зарядк|заряжаться|печатать|принтер|приставк|пылесос|консоль)',
+    re.IGNORECASE
+)
+
+def extract_problem_from_dialog(client_lines, robot_lines):
+    # 1) Пытаемся найти "резюме" проблемы в репликах робота
+    #    ("Проверьте: игровая приставка, проблемы с зарядкой")
+    summary_problems = []
+    for line in robot_lines:
+        if re.search(r'(Проверьте|Поняла|Записала|Итак|Значит|Хорошо)', line, re.IGNORECASE) \
+                and PROBLEM_KEYWORDS.search(line):
+            line_clean = re.sub(
+                r'^(Проверьте|Поняла|Записала|Итак|Значит|Хорошо)[:,]?\s*',
+                '', line, flags=re.IGNORECASE
+            )
+            line_clean = re.sub(
+                r'\b(адрес|улица|дом|квартира|телефон|номер|подъезд|этаж)\b.*',
+                '', line_clean, flags=re.IGNORECASE
+            ).strip(' ,.')
+            line_clean = re.sub(
+                r'^(телевизор|холодильник|стиральная|посудомоечная|микроволновка|'
+                r'кофемашина|пылесос|кондиционер|принтер|ноутбук|компьютер|'
+                r'духовой шкаф|плита|телефон|планшет|колонка|приставка)[,:]?\s*',
+                '', line_clean, flags=re.IGNORECASE
+            ).strip(' ,.')
+            if line_clean and len(line_clean) >= 5:
+                summary_problems.append(line_clean)
+    if summary_problems:
+        best = summary_problems[-1]
+        return best[:120] + ('...' if len(best) > 120 else '')
+
+    # 2) Иначе — берём лучшую реплику клиента
+    candidates = []
+    for line in client_lines:
+        if is_price_question(line):
+            continue
+        if not is_meaningful_issue(line):
+            continue
+        if PROBLEM_KEYWORDS.search(line):
+            candidates.append(line.strip())
+    if not candidates:
+        return "не указана"
+    def score(s):
+        return len(PROBLEM_KEYWORDS.findall(s))
+    best = max(candidates, key=score)
+    return best[:120] + ('...' if len(best) > 120 else '')
+
+
+# Реплики РОБОТА — техника не нашего профиля
+ROBOT_REFUSAL_PATTERNS = [
     r'это\s+не\s+та\s+техника',
-    r'не\s+та\s+техника',
-    r'не\s+ремонтируем',
+    r'не\s+та\s+техника,?\s+которую\s+мы',
+    r'мы\s+не\s+ремонтируем',
     r'не\s+занимаемся\s+ремонтом',
     r'не\s+входит\s+в\s+наш',
     r'не\s+наш\s+профиль',
-    r'мы\s+специализируемся\s+на',
-    r'это\s+мелкая\s+техника',       # пылесосы, фены и т.п. — не выезжаем
-    r'принимаем\s+только\s+в\s+филиале',
-    r'выезд\s+мастера\s+не\s+предусмотрен',
-    # Клиент: отказывается
+]
+
+# Реплики КЛИЕНТА — прямой отказ от услуги
+CLIENT_REFUSAL_PATTERNS = [
     r'\bне\s+надо\b',
     r'\bне\s+нужно\b',
     r'\bне\s+интерес(но|ует)\b',
-    r'\bне\s+хочу\b',
     r'\bотказ(ыв)?аюсь\b',
     r'\bперезвон(ите|ю)\s+позже\b',
     r'\bпозже\s+перезвон',
-    r'\bя\s+уже\s+(починил|наш[её]л|сделал|решил)',
+    r'\bперезвоните\s+потом\b',
+    r'\bя\s+уже\s+(починил|наш[её]л|сделал|решил|отдал)',
     r'\bуже\s+не\s+актуально\b',
     r'\bне\s+актуально\b',
-    r'\bвс[её]\s+спасибо\b',
-    r'\bдо\s+свидания\b',
-    r'\bотстаньте\b',
     r'\bне\s+звоните\b',
-    r'\bошиб(ка|ся|лись)\b',
     r'\bне\s+могу\s+говорить\b',
-    r'\bзанят[аы]?\b',
-    r'\bперезвоните\s+потом\b',
-    # Робот: клиент положил трубку / не отвечает
-    r'\bалло\b\s*\.?\s*$',            # если клиент сказал только "Алло"
+    r'\bмне\s+это\s+не\s+нужно\b',
+    r'\bя\s+передумал',
 ]
+
 
 def parse_zvonok(body):
     """Парсер заявок от zvonok.com (робот-обзвон 'Эльвира')."""
@@ -387,37 +553,65 @@ def parse_zvonok(body):
     else:
         phone = raw_phone
 
-    # ---- Проверка на отказ (по всему тексту разговора) ----
-    for pattern in ZVONOK_REFUSAL_PATTERNS:
-        if re.search(pattern, body, re.IGNORECASE | re.MULTILINE):
-            logger.info(f"Zvonok: отказ по паттерну '{pattern}', заявка пропущена")
-            return None
+    # ---- Реплики ----
+    robot_lines = [p.strip() for p in re.findall(r'Робот:\s*([^\n]+)', body) if p.strip()]
+    client_lines = [p.strip() for p in re.findall(r'Клиент:\s*([^\n]+)', body) if p.strip()]
 
-    # ---- Реплики клиента ----
-    client_phrases = [p.strip() for p in re.findall(r'Клиент:\s*([^\n]+)', body) if p.strip()]
-    if not client_phrases:
+    if not client_lines:
         logger.info("Zvonok: клиент ничего не сказал, заявка пропущена")
         return None
 
-    client_text = ' '.join(client_phrases)
-    cleaned = clean_text(client_text)
+    robot_text = ' '.join(robot_lines)
+    client_text = ' '.join(client_lines)
+    all_text_lower = (robot_text + ' ' + client_text).lower()
 
-    if not cleaned or not is_meaningful_issue(cleaned):
-        logger.info(f"Zvonok: неосмысленный текст ('{cleaned}'), заявка пропущена")
+    # ---- Отказ робота ----
+    for pattern in ROBOT_REFUSAL_PATTERNS:
+        if re.search(pattern, robot_text, re.IGNORECASE):
+            logger.info(f"Zvonok: робот отказал ('{pattern}'), заявка пропущена")
+            return None
+
+    # ---- Отказ клиента ----
+    for pattern in CLIENT_REFUSAL_PATTERNS:
+        if re.search(pattern, client_text, re.IGNORECASE):
+            logger.info(f"Zvonok: клиент отказался ('{pattern}'), заявка пропущена")
+            return None
+
+    # ---- Определяем категорию ----
+    category_key = detect_category(client_text)
+    if category_key == "other":
+        category_key = detect_category(robot_text)
+
+    # ---- Извлекаем проблему ----
+    problem = extract_problem_from_dialog(client_lines, robot_lines)
+
+    # ---- Извлекаем адрес ----
+    address = extract_address_from_dialog(client_lines, robot_lines)
+    if not address:
+        if re.search(
+            r'(ждем вас|принимаем только в филиале|филиал|находимся на|ждем вас на|'
+            r'привозите к нам|в филиал)',
+            all_text_lower
+        ):
+            address = "филиал (привоз)"
+        else:
+            address = "не указано"
+
+    # Для филиальных категорий — если упоминается Широтная, значит привоз
+    if category_key in FILIAL_CATEGORIES and address != "не указано" and "широтная" in address.lower():
+        address = "филиал (привоз)"
+
+    # ---- Финальный фильтр: ни проблемы, ни адреса ----
+    if problem == "не указана" and address == "не указано":
+        logger.info("Zvonok: нет ни проблемы, ни адреса – заявка отклонена")
         return None
 
-    # ---- Категория ----
-    category_key = detect_category(client_text)
-
-    # Если категория не определилась и осталась "other", но в тексте робота
-    # явно упоминается тип техники — попробуем по полному тексту
-    if category_key == "other":
-        category_key = detect_category(body)
-
+    # ---- Формируем текст ----
     text = (
         "🚨 Новая заявка (Звонок)!\n"
         f"📞 Телефон: {phone}\n"
-        f"💬 Проблема: {cleaned}\n"
+        f"💬 Проблема: {problem}\n"
+        f"📍 Адрес: {address}\n"
     )
     return text, category_key
 
@@ -539,7 +733,7 @@ def detect_category(text: str) -> str:
         return "coffee"
     if any(w in t for w in ["колонка", "алиса", "маруся", "sberbox", "яндекс станция"]):
         return "speaker"
-    if any(w in t for w in ["приставка", "xbox", "playstation", "плейстейшн", "плейстайшн", "плюстшн", "плюс сейшн", "ps4", "ps5", "nintendo", "джойстик", "геймпад", "игровая"]):
+    if any(w in t for w in ["приставка", "xbox", "playstation", "плейстейшн", "плейстайшн", "плюстшн", "плюс сейшн", "ps4", "ps5", "nintendo", "джойстик", "геймпад", "игровая", "консоль"]):
         return "console"
     return "other"
 
