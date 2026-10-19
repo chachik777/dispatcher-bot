@@ -35,4 +35,4 @@ jobs:
           revision-image-url: cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:${{ github.sha }}
           revision-cores: 1
           revision-memory: 512Mb
-          service-account-id: aje1gmebor2944ni6etv
+          revision-service-account-id: aje1gmebor2944ni6etv
