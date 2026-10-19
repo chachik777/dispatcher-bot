@@ -89,8 +89,8 @@ EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
-# ИЗМЕНЕНИЕ 1: Порт по умолчанию теперь 80 (как ждет Amvera)
-WEBHOOK_PORT = int(os.getenv("PORT", "80"))
+# ЖЕСТКО ЗАДАЕМ ПОРТ 80 ДЛЯ AMVERA
+WEBHOOK_PORT = 80
 
 GROUPS = {
     "computers": [-1004355591778, -1003976268046, -1003395683617, -1004445931308, -1003734200853],
@@ -680,7 +680,6 @@ async def handle_health(request):
     return web.json_response({'status': 'ok', 'service': 'dispatcher-bot'})
 
 
-# ИЗМЕНЕНИЕ 2: Отлов ошибок при запуске сервера и лог успеха
 async def start_web_server():
     try:
         app = web.Application()
