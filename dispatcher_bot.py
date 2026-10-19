@@ -89,7 +89,8 @@ EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.mail.ru")
 
-WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
+# ИЗМЕНЕНИЕ 1: Порт по умолчанию теперь 80 (как ждет Amvera)
+WEBHOOK_PORT = int(os.getenv("PORT", "80"))
 
 GROUPS = {
     "computers": [-1004355591778, -1003976268046, -1003395683617, -1004445931308, -1003734200853],
@@ -460,8 +461,6 @@ PROBLEM_KEYWORDS = re.compile(
 )
 
 def extract_problem_from_dialog(client_lines, robot_lines):
-    # 1) Пытаемся найти "резюме" проблемы в репликах робота
-    #    ("Проверьте: игровая приставка, проблемы с зарядкой")
     summary_problems = []
     for line in robot_lines:
         if re.search(r'(Проверьте|Поняла|Записала|Итак|Значит|Хорошо)', line, re.IGNORECASE) \
@@ -486,7 +485,6 @@ def extract_problem_from_dialog(client_lines, robot_lines):
         best = summary_problems[-1]
         return best[:120] + ('...' if len(best) > 120 else '')
 
-    # 2) Иначе — берём лучшую реплику клиента
     candidates = []
     for line in client_lines:
         if is_price_question(line):
@@ -503,7 +501,6 @@ def extract_problem_from_dialog(client_lines, robot_lines):
     return best[:120] + ('...' if len(best) > 120 else '')
 
 
-# Реплики РОБОТА — техника не нашего профиля
 ROBOT_REFUSAL_PATTERNS = [
     r'это\s+не\s+та\s+техника',
     r'не\s+та\s+техника,?\s+которую\s+мы',
@@ -513,7 +510,6 @@ ROBOT_REFUSAL_PATTERNS = [
     r'не\s+наш\s+профиль',
 ]
 
-# Реплики КЛИЕНТА — прямой отказ от услуги
 CLIENT_REFUSAL_PATTERNS = [
     r'\bне\s+надо\b',
     r'\bне\s+нужно\b',
@@ -533,8 +529,6 @@ CLIENT_REFUSAL_PATTERNS = [
 
 
 def parse_zvonok(body):
-    """Парсер заявок от zvonok.com (робот-обзвон 'Эльвира')."""
-    # ---- Телефон ----
     m = re.search(r'^phone:\s*(\+?\d[\d\s\-]{9,})', body, re.MULTILINE | re.IGNORECASE)
     if not m:
         m = re.search(r'^Телефон:\s*(\+?\d[\d\s\-]{9,})', body, re.MULTILINE | re.IGNORECASE)
@@ -553,7 +547,6 @@ def parse_zvonok(body):
     else:
         phone = raw_phone
 
-    # ---- Реплики ----
     robot_lines = [p.strip() for p in re.findall(r'Робот:\s*([^\n]+)', body) if p.strip()]
     client_lines = [p.strip() for p in re.findall(r'Клиент:\s*([^\n]+)', body) if p.strip()]
 
@@ -565,27 +558,22 @@ def parse_zvonok(body):
     client_text = ' '.join(client_lines)
     all_text_lower = (robot_text + ' ' + client_text).lower()
 
-    # ---- Отказ робота ----
     for pattern in ROBOT_REFUSAL_PATTERNS:
         if re.search(pattern, robot_text, re.IGNORECASE):
             logger.info(f"Zvonok: робот отказал ('{pattern}'), заявка пропущена")
             return None
 
-    # ---- Отказ клиента ----
     for pattern in CLIENT_REFUSAL_PATTERNS:
         if re.search(pattern, client_text, re.IGNORECASE):
             logger.info(f"Zvonok: клиент отказался ('{pattern}'), заявка пропущена")
             return None
 
-    # ---- Определяем категорию ----
     category_key = detect_category(client_text)
     if category_key == "other":
         category_key = detect_category(robot_text)
 
-    # ---- Извлекаем проблему ----
     problem = extract_problem_from_dialog(client_lines, robot_lines)
 
-    # ---- Извлекаем адрес ----
     address = extract_address_from_dialog(client_lines, robot_lines)
     if not address:
         if re.search(
@@ -597,16 +585,13 @@ def parse_zvonok(body):
         else:
             address = "не указано"
 
-    # Для филиальных категорий — если упоминается Широтная, значит привоз
     if category_key in FILIAL_CATEGORIES and address != "не указано" and "широтная" in address.lower():
         address = "филиал (привоз)"
 
-    # ---- Финальный фильтр: ни проблемы, ни адреса ----
     if problem == "не указана" and address == "не указано":
         logger.info("Zvonok: нет ни проблемы, ни адреса – заявка отклонена")
         return None
 
-    # ---- Формируем текст ----
     text = (
         "🚨 Новая заявка (Звонок)!\n"
         f"📞 Телефон: {phone}\n"
@@ -618,7 +603,6 @@ def parse_zvonok(body):
 
 # ---------- WEBHOOK: приём заявок с Cloudflare Worker ----------
 def build_message_from_json(data: dict):
-    """Собирает текст заявки и category_key из JSON, который шлёт Worker."""
     name = data.get('name', 'не указано')
     phone = data.get('phone', 'не указан')
     category = data.get('category', 'не указана')
@@ -667,7 +651,6 @@ def build_message_from_json(data: dict):
 
 
 async def handle_webhook(request):
-    """Принимает POST от Cloudflare Worker."""
     try:
         data = await request.json()
         logger.info(f"WEBHOOK получен: {data}")
@@ -697,16 +680,20 @@ async def handle_health(request):
     return web.json_response({'status': 'ok', 'service': 'dispatcher-bot'})
 
 
+# ИЗМЕНЕНИЕ 2: Отлов ошибок при запуске сервера и лог успеха
 async def start_web_server():
-    app = web.Application()
-    app.router.add_post('/webhook', handle_webhook)
-    app.router.add_get('/health', handle_health)
-    app.router.add_get('/', handle_health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', WEBHOOK_PORT)
-    await site.start()
-    logger.info(f"HTTP-сервер запущен на 0.0.0.0:{WEBHOOK_PORT}")
+    try:
+        app = web.Application()
+        app.router.add_post('/webhook', handle_webhook)
+        app.router.add_get('/health', handle_health)
+        app.router.add_get('/', handle_health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', WEBHOOK_PORT)
+        await site.start()
+        logger.info(f"✅ HTTP-сервер УСПЕШНО запущен на 0.0.0.0:{WEBHOOK_PORT}")
+    except Exception as e:
+        logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА при запуске веб-сервера: {e}", exc_info=True)
 
 # ---------- ОСТАЛЬНЫЕ ФУНКЦИИ ----------
 def detect_category(text: str) -> str:
