@@ -11,34 +11,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Yandex Cloud CLI
-        run: |
-          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
-          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+      - name: Get Yandex Cloud IAM token
+        id: get-iam-token
+        uses: docker://ghcr.io/yc-actions/yc-iam-token-fed:1.0.0
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
 
-      - name: Auth with Yandex Cloud
-        run: |
-          echo '${{ secrets.YC_SA_JSON_CREDENTIALS }}' > key.json
-          yc config profile create sa-profile
-          yc config set service-account-key key.json
-          yc config set folder-id ${{ secrets.YC_FOLDER_ID }}
+      - name: Login to Yandex Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: cr.yandex
+          username: iam
+          password: ${{ steps.get-iam-token.outputs.token }}
 
-      - name: Login to Container Registry
+      - name: Build and push Docker image
+        env:
+          CR_REGISTRY: ${{ secrets.YC_CONTAINER_ID }}
+          CR_REPOSITORY: dispatcher-bot
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          yc container registry configure-docker
-          echo "Yandex Cloud CLI configured"
+          docker build -t cr.yandex/$CR_REGISTRY/$CR_REPOSITORY:$IMAGE_TAG .
+          docker push cr.yandex/$CR_REGISTRY/$CR_REPOSITORY:$IMAGE_TAG
 
-      - name: Build and Push Docker Image
-        run: |
-          docker build -t cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:latest .
-          docker push cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:latest
-
-      - name: Deploy to Serverless Containers
-        run: |
-          yc serverless container revision deploy \
-            --container-name dispatcher-bot \
-            --image cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:latest \
-            --cores 1 \
-            --memory 512MB \
-            --execution-timeout 60s \
-            --concurrency 1
+      - name: Deploy Serverless Container
+        uses: yc-actions/yc-sls-container-deploy@v5
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          container-name: dispatcher-bot
+          folder-id: ${{ secrets.YC_FOLDER_ID }}
+          revision-image-url: cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:${{ github.sha }}
+          revision-cores: 1
+          revision-memory: 512Mb
