@@ -1,0 +1,44 @@
+name: Deploy to Yandex Serverless Containers
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Yandex Cloud CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+
+      - name: Auth with Yandex Cloud
+        run: |
+          echo '${{ secrets.YC_SA_JSON_CREDENTIALS }}' > key.json
+          yc config profile create sa-profile
+          yc config set service-account-key key.json
+          yc config set folder-id ${{ secrets.YC_FOLDER_ID }}
+
+      - name: Login to Container Registry
+        run: |
+          yc container registry configure-docker
+          echo "Yandex Cloud CLI configured"
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:latest .
+          docker push cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:latest
+
+      - name: Deploy to Serverless Containers
+        run: |
+          yc serverless container revision deploy \
+            --container-name dispatcher-bot \
+            --image cr.yandex/${{ secrets.YC_CONTAINER_ID }}/dispatcher-bot:latest \
+            --cores 1 \
+            --memory 512MB \
+            --execution-timeout 60s \
+            --concurrency 1
