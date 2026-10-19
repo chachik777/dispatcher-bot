@@ -11,18 +11,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get Yandex Cloud IAM token
-        id: get-iam-token
-        uses: docker://ghcr.io/yc-actions/yc-iam-token-fed:1.0.0
-        with:
-          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
-
       - name: Login to Yandex Container Registry
         uses: docker/login-action@v3
         with:
           registry: cr.yandex
           username: iam
-          password: ${{ steps.get-iam-token.outputs.token }}
+          password: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
 
       - name: Build and push Docker image
         env:
