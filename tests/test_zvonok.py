@@ -1,9 +1,10 @@
+import asyncio
 import email
 from email.message import EmailMessage
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def _install_stubs():
@@ -511,6 +512,118 @@ class TestZvonokPhraseParsing(unittest.TestCase):
         )
         self.assertEqual(bh_cat, "appliances")
         self.assertIn("Bosch", bh_text)
+
+
+class TestMasterChatCallbacks(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        bot.active_requests.clear()
+
+    async def asyncTearDown(self):
+        for req in list(bot.active_requests.values()):
+            t = req.get("timer")
+            if t:
+                t.cancel()
+        bot.active_requests.clear()
+
+    def _make_query(self, data: str, chat_id: int = -1001, msg_id: int = 555, delete_side_effect=None):
+        msg = MagicMock()
+        msg.chat_id = chat_id
+        msg.message_id = msg_id
+        msg.delete = AsyncMock(side_effect=delete_side_effect)
+
+        user = MagicMock()
+        user.username = "master_ivan"
+        user.first_name = "Ivan"
+
+        query = MagicMock()
+        query.data = data
+        query.message = msg
+        query.from_user = user
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.edit_message_reply_markup = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        return update, query, msg
+
+    async def test_stale_reject_and_accept_delete_message_from_master_chat(self):
+        # Неактивная заявка: нажатие "Не беру" должно удалить сообщение из чата мастеров
+        upd_rej, q_rej, msg_rej = self._make_query("reject_999999")
+        await bot.handle_callback(upd_rej, None)
+        q_rej.answer.assert_awaited_once()
+        msg_rej.delete.assert_awaited_once()
+        q_rej.edit_message_reply_markup.assert_not_awaited()
+
+        # Неактивная заявка: нажатие "Принимаю" также должно удалить устаревшее сообщение
+        upd_acc, q_acc, msg_acc = self._make_query("accept_999998")
+        await bot.handle_callback(upd_acc, None)
+        q_acc.answer.assert_awaited_once()
+        msg_acc.delete.assert_awaited_once()
+        q_acc.edit_message_reply_markup.assert_not_awaited()
+
+        # Если удалить нельзя (например, нет прав или >48ч), убираются кнопки (fallback)
+        upd_fb, q_fb, msg_fb = self._make_query("reject_999997", delete_side_effect=RuntimeError("Too old"))
+        await bot.handle_callback(upd_fb, None)
+        msg_fb.delete.assert_awaited_once()
+        q_fb.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+
+    async def test_active_reject_deletes_current_and_forwards_or_escalates(self):
+        sent_next = MagicMock(chat_id=-1002, message_id=777)
+        with patch.object(bot.bot, "send_message", AsyncMock(return_value=sent_next)) as send_mock:
+            bot.active_requests[12345] = {
+                "text": "🚨 Новая заявка!\n📞 Телефон: +79001112233",
+                "current_group_index": 0,
+                "groups": [-1001, -1002],
+                "timer": None,
+                "category": "computers",
+                "chat_id": -1001,
+                "tg_message_id": 555,
+                "transitioning": False,
+            }
+            upd1, q1, msg1 = self._make_query("reject_12345", chat_id=-1001, msg_id=555)
+            await bot.handle_callback(upd1, None)
+
+            msg1.delete.assert_awaited_once()
+            self.assertEqual(bot.active_requests[12345]["current_group_index"], 1)
+            self.assertEqual(bot.active_requests[12345]["chat_id"], -1002)
+            self.assertEqual(bot.active_requests[12345]["tg_message_id"], 777)
+            self.assertFalse(bot.active_requests[12345]["transitioning"])
+
+            # Нажатие на старую карточку после передачи должно удалить её и НЕ двигать индекс повторно
+            upd_old, q_old, msg_old = self._make_query("reject_12345", chat_id=-1001, msg_id=555)
+            await bot.handle_callback(upd_old, None)
+            msg_old.delete.assert_awaited_once()
+            self.assertEqual(bot.active_requests[12345]["current_group_index"], 1)
+
+            # Отказ в последней группе удаляет карточку и эскалирует в GENERAL_GROUP
+            upd2, q2, msg2 = self._make_query("reject_12345", chat_id=-1002, msg_id=777)
+            await bot.handle_callback(upd2, None)
+            msg2.delete.assert_awaited_once()
+            self.assertNotIn(12345, bot.active_requests)
+            self.assertEqual(send_mock.await_args_list[-1].kwargs["chat_id"], bot.GENERAL_GROUP)
+            self.assertIn("Никто не принял", send_mock.await_args_list[-1].kwargs["text"])
+
+    async def test_timer_expiry_deletes_old_master_message_before_next_group(self):
+        sent_next = MagicMock(chat_id=-1002, message_id=888)
+        with patch.object(bot.bot, "delete_message", AsyncMock()) as del_mock, \
+             patch.object(bot.bot, "send_message", AsyncMock(return_value=sent_next)) as send_mock, \
+             patch.object(bot.asyncio, "sleep", AsyncMock()):
+            bot.active_requests[22222] = {
+                "text": "🚨 Новая заявка!\n📞 Телефон: +79001112233",
+                "current_group_index": 0,
+                "groups": [-1001, -1002],
+                "timer": None,
+                "category": "computers",
+                "chat_id": -1001,
+                "tg_message_id": 600,
+                "transitioning": False,
+            }
+            await bot.start_timer(22222)
+            del_mock.assert_awaited_once_with(chat_id=-1001, message_id=600)
+            send_mock.assert_awaited_once()
+            self.assertEqual(bot.active_requests[22222]["chat_id"], -1002)
+            self.assertEqual(bot.active_requests[22222]["tg_message_id"], 888)
 
 
 if __name__ == "__main__":

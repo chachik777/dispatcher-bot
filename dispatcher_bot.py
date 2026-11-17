@@ -1986,7 +1986,7 @@ async def send_request_with_buttons(chat_id: int, text: str, message_id: int):
                 InlineKeyboardButton("❌ Не беру", callback_data=f"reject_{message_id}")
             ]
         ])
-        await bot.send_message(chat_id=chat_id, text=masked_text, reply_markup=keyboard)
+        return await bot.send_message(chat_id=chat_id, text=masked_text, reply_markup=keyboard)
     except ChatMigrated as e:
         new_id = e.migrate_to_chat_id
         for cat, groups in GROUPS.items():
@@ -1994,30 +1994,63 @@ async def send_request_with_buttons(chat_id: int, text: str, message_id: int):
                 groups.remove(chat_id)
                 groups.append(new_id)
                 break
-        await send_request_with_buttons(new_id, text, message_id)
+        return await send_request_with_buttons(new_id, text, message_id)
+
+async def _delete_master_message(message=None, chat_id: int = None, msg_id: int = None) -> bool:
+    try:
+        if message is not None:
+            await message.delete()
+            return True
+        if chat_id is not None and msg_id is not None:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            return True
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение заявки из чата мастеров: {e}")
+    return False
+
+async def _cleanup_stale_master_message(query):
+    deleted = await _delete_master_message(getattr(query, "message", None))
+    if not deleted:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
 async def start_timer(message_id: int):
     await asyncio.sleep(1)
     req = active_requests.get(message_id)
-    if not req: return
+    if not req:
+        return
     category = req.get("category", "other")
     timeout = get_timeout(category) - 1
     await asyncio.sleep(timeout)
     req = active_requests.get(message_id)
-    if not req: return
+    if not req or req.get("transitioning"):
+        return
+    req["transitioning"] = True
+    await _delete_master_message(None, req.get("chat_id"), req.get("tg_message_id"))
+    req["chat_id"] = None
+    req["tg_message_id"] = None
     req["current_group_index"] += 1
     groups = req["groups"]
     if req["current_group_index"] >= len(groups):
+        active_requests.pop(message_id, None)
         await bot.send_message(
             chat_id=GENERAL_GROUP,
             text=f"⚠️ Никто не принял заявку:\n\n{req['text']}"
         )
-        del active_requests[message_id]
     else:
         next_group = groups[req["current_group_index"]]
-        await send_request_with_buttons(next_group, req["text"], message_id)
-        task = asyncio.create_task(start_timer(message_id))
-        req["timer"] = task
+        try:
+            sent = await send_request_with_buttons(next_group, req["text"], message_id)
+        except Exception:
+            active_requests.pop(message_id, None)
+            raise
+        if sent is not None:
+            req["chat_id"] = getattr(sent, "chat_id", next_group)
+            req["tg_message_id"] = getattr(sent, "message_id", None)
+        req["transitioning"] = False
+        req["timer"] = asyncio.create_task(start_timer(message_id))
 
 async def handle_general_message(update, context):
     if update.effective_chat.id != GENERAL_GROUP: return
@@ -2028,19 +2061,33 @@ async def handle_general_message(update, context):
 
 async def handle_callback(update, context):
     query = update.callback_query
+    if not query or not query.data:
+        return
     data = query.data
-    message_id = int(data.split("_")[1])
+    try:
+        message_id = int(data.split("_", 1)[1])
+    except (IndexError, ValueError):
+        return
+
     if data.startswith("accept_"):
+        req = active_requests.get(message_id)
+        if not req or req.get("transitioning") or (
+            req.get("tg_message_id") and query.message and (
+                query.message.message_id != req["tg_message_id"]
+                or query.message.chat_id != req.get("chat_id")
+            )
+        ):
+            await query.answer("Заявка уже обработана или устарела.", show_alert=True)
+            await _cleanup_stale_master_message(query)
+            return
         req = active_requests.pop(message_id, None)
         if not req:
             await query.answer("Заявка уже обработана или устарела.", show_alert=True)
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            await _cleanup_stale_master_message(query)
             return
         await query.answer()
-        if req["timer"]: req["timer"].cancel()
+        if req["timer"]:
+            req["timer"].cancel()
         username = query.from_user.username or query.from_user.first_name
         chat_id = query.message.chat_id
         msg_id = query.message.message_id
@@ -2059,30 +2106,42 @@ async def handle_callback(update, context):
             logger.error(f"Не удалось отправить уведомление в общую группу: {e}")
     elif data.startswith("reject_"):
         req = active_requests.get(message_id)
-        if not req:
+        if not req or req.get("transitioning") or (
+            req.get("tg_message_id") and query.message and (
+                query.message.message_id != req["tg_message_id"]
+                or query.message.chat_id != req.get("chat_id")
+            )
+        ):
             await query.answer("Заявка уже неактивна.", show_alert=True)
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            await _cleanup_stale_master_message(query)
             return
+        req["transitioning"] = True
+        if req["timer"]:
+            req["timer"].cancel()
         await query.answer()
-        if req["timer"]: req["timer"].cancel()
-        try: await query.message.delete()
-        except Exception as e: logger.error(f"Не удалось удалить сообщение: {e}")
+        await _delete_master_message(query.message)
+        req["chat_id"] = None
+        req["tg_message_id"] = None
         req["current_group_index"] += 1
         groups = req["groups"]
         if req["current_group_index"] >= len(groups):
+            active_requests.pop(message_id, None)
             await bot.send_message(
                 chat_id=GENERAL_GROUP,
                 text=f"⚠️ Никто не принял заявку:\n\n{req['text']}"
             )
-            del active_requests[message_id]
         else:
             next_group = groups[req["current_group_index"]]
-            await send_request_with_buttons(next_group, req["text"], message_id)
-            task = asyncio.create_task(start_timer(message_id))
-            req["timer"] = task
+            try:
+                sent = await send_request_with_buttons(next_group, req["text"], message_id)
+            except Exception:
+                active_requests.pop(message_id, None)
+                raise
+            if sent is not None:
+                req["chat_id"] = getattr(sent, "chat_id", next_group)
+                req["tg_message_id"] = getattr(sent, "message_id", None)
+            req["transitioning"] = False
+            req["timer"] = asyncio.create_task(start_timer(message_id))
 
 async def dispatch_request(text, category_key=None):
     if "🚨 Новая заявка" not in text:
@@ -2113,15 +2172,27 @@ async def dispatch_request(text, category_key=None):
     message_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     while message_id in active_requests:
         message_id += 1
-    task = asyncio.create_task(start_timer(message_id))
-    active_requests[message_id] = {
+    req = {
         "text": text,
         "current_group_index": 0,
         "groups": groups,
-        "timer": task,
-        "category": category_key
+        "timer": None,
+        "category": category_key,
+        "chat_id": None,
+        "tg_message_id": None,
+        "transitioning": False,
     }
-    await send_request_with_buttons(groups[0], text, message_id)
+    active_requests[message_id] = req
+    try:
+        sent = await send_request_with_buttons(groups[0], text, message_id)
+    except Exception:
+        active_requests.pop(message_id, None)
+        raise
+    if sent is not None:
+        req["chat_id"] = getattr(sent, "chat_id", groups[0])
+        req["tg_message_id"] = getattr(sent, "message_id", None)
+    if message_id in active_requests:
+        req["timer"] = asyncio.create_task(start_timer(message_id))
 
 async def send_and_dispatch(text, category_key=None):
     logger.info("send_and_dispatch вызван")
