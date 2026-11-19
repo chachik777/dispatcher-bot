@@ -145,6 +145,7 @@ CATEGORY_NAMES = {
 FILIAL_CATEGORIES = {"vacuum", "microwave", "coffee", "speaker", "console", "phone"}
 
 active_requests = {}
+accepted_requests = {}
 recent_phones = {}
 main_loop = None
 
@@ -1996,7 +1997,32 @@ async def send_request_with_buttons(chat_id: int, text: str, message_id: int):
                 break
         return await send_request_with_buttons(new_id, text, message_id)
 
+def _is_accepted_master_message(message) -> bool:
+    if message is None:
+        return False
+    for attr in ("text", "caption"):
+        val = getattr(message, attr, None)
+        if isinstance(val, str) and val.lstrip().startswith("✅ Заявку принял"):
+            return True
+    return False
+
+def _record_accepted_request(message_id: int, username: str, chat_id: int = None, msg_id: int = None):
+    now = datetime.now()
+    cutoff = now - timedelta(hours=24)
+    expired = [k for k, v in accepted_requests.items() if v.get("ts") and v["ts"] < cutoff]
+    for k in expired:
+        accepted_requests.pop(k, None)
+    accepted_requests[message_id] = {
+        "username": username,
+        "chat_id": chat_id,
+        "tg_message_id": msg_id,
+        "ts": now,
+    }
+
 async def _delete_master_message(message=None, chat_id: int = None, msg_id: int = None) -> bool:
+    if _is_accepted_master_message(message):
+        logger.info("Защита от удаления: сообщение уже принято мастером")
+        return False
     try:
         if message is not None:
             await message.delete()
@@ -2009,7 +2035,10 @@ async def _delete_master_message(message=None, chat_id: int = None, msg_id: int 
     return False
 
 async def _cleanup_stale_master_message(query):
-    deleted = await _delete_master_message(getattr(query, "message", None))
+    msg = getattr(query, "message", None)
+    if _is_accepted_master_message(msg):
+        return
+    deleted = await _delete_master_message(msg)
     if not deleted:
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -2070,6 +2099,18 @@ async def handle_callback(update, context):
         return
 
     if data.startswith("accept_"):
+        accepted = accepted_requests.get(message_id)
+        if accepted:
+            await query.answer(f"Заявку уже принял @{accepted['username']}.", show_alert=True)
+            if query.message and (
+                query.message.chat_id != accepted.get("chat_id")
+                or query.message.message_id != accepted.get("tg_message_id")
+            ):
+                await _cleanup_stale_master_message(query)
+            return
+        if _is_accepted_master_message(getattr(query, "message", None)):
+            await query.answer("Заявка уже принята.", show_alert=True)
+            return
         req = active_requests.get(message_id)
         if not req or req.get("transitioning") or (
             req.get("tg_message_id") and query.message and (
@@ -2085,18 +2126,32 @@ async def handle_callback(update, context):
             await query.answer("Заявка уже обработана или устарела.", show_alert=True)
             await _cleanup_stale_master_message(query)
             return
+        username = query.from_user.username or query.from_user.first_name
+        chat_id = query.message.chat_id if query.message else req.get("chat_id")
+        msg_id = query.message.message_id if query.message else req.get("tg_message_id")
+        _record_accepted_request(message_id, username, chat_id, msg_id)
         await query.answer()
         if req["timer"]:
             req["timer"].cancel()
-        username = query.from_user.username or query.from_user.first_name
-        chat_id = query.message.chat_id
-        msg_id = query.message.message_id
         full_text = req["text"]
-        await query.edit_message_text(f"✅ Заявку принял @{username}\n\n{full_text}")
+        accepted_text = f"✅ Заявку принял @{username}\n\n{full_text}"
         try:
-            await bot.pin_chat_message(chat_id=chat_id, message_id=msg_id, disable_notification=True)
+            await query.edit_message_text(accepted_text)
         except Exception as e:
-            logger.error(f"Не удалось закрепить сообщение: {e}")
+            logger.error(f"Не удалось отредактировать принятую заявку {message_id}: {e}")
+            if chat_id is not None:
+                try:
+                    sent_fallback = await bot.send_message(chat_id=chat_id, text=accepted_text)
+                    if sent_fallback is not None:
+                        msg_id = getattr(sent_fallback, "message_id", msg_id)
+                        accepted_requests[message_id]["tg_message_id"] = msg_id
+                except Exception as e2:
+                    logger.error(f"Не удалось отправить резервное сообщение принятой заявки: {e2}")
+        if chat_id is not None and msg_id is not None:
+            try:
+                await bot.pin_chat_message(chat_id=chat_id, message_id=msg_id, disable_notification=True)
+            except Exception as e:
+                logger.error(f"Не удалось закрепить сообщение: {e}")
         try:
             await bot.send_message(
                 chat_id=GENERAL_GROUP,
@@ -2105,6 +2160,18 @@ async def handle_callback(update, context):
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление в общую группу: {e}")
     elif data.startswith("reject_"):
+        accepted = accepted_requests.get(message_id)
+        if accepted:
+            await query.answer(f"Заявку уже принял @{accepted['username']}.", show_alert=True)
+            if query.message and (
+                query.message.chat_id != accepted.get("chat_id")
+                or query.message.message_id != accepted.get("tg_message_id")
+            ):
+                await _cleanup_stale_master_message(query)
+            return
+        if _is_accepted_master_message(getattr(query, "message", None)):
+            await query.answer("Заявка уже принята.", show_alert=True)
+            return
         req = active_requests.get(message_id)
         if not req or req.get("transitioning") or (
             req.get("tg_message_id") and query.message and (

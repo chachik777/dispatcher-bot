@@ -517,6 +517,7 @@ class TestZvonokPhraseParsing(unittest.TestCase):
 class TestMasterChatCallbacks(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         bot.active_requests.clear()
+        bot.accepted_requests.clear()
 
     async def asyncTearDown(self):
         for req in list(bot.active_requests.values()):
@@ -524,11 +525,14 @@ class TestMasterChatCallbacks(unittest.IsolatedAsyncioTestCase):
             if t:
                 t.cancel()
         bot.active_requests.clear()
+        bot.accepted_requests.clear()
 
-    def _make_query(self, data: str, chat_id: int = -1001, msg_id: int = 555, delete_side_effect=None):
+    def _make_query(self, data: str, chat_id: int = -1001, msg_id: int = 555, delete_side_effect=None, msg_text=None):
         msg = MagicMock()
         msg.chat_id = chat_id
         msg.message_id = msg_id
+        msg.text = msg_text
+        msg.caption = None
         msg.delete = AsyncMock(side_effect=delete_side_effect)
 
         user = MagicMock()
@@ -624,6 +628,53 @@ class TestMasterChatCallbacks(unittest.IsolatedAsyncioTestCase):
             send_mock.assert_awaited_once()
             self.assertEqual(bot.active_requests[22222]["chat_id"], -1002)
             self.assertEqual(bot.active_requests[22222]["tg_message_id"], 888)
+
+    async def test_double_or_concurrent_accept_does_not_delete_pinned_message(self):
+        with patch.object(bot.bot, "pin_chat_message", AsyncMock()) as pin_mock, \
+             patch.object(bot.bot, "send_message", AsyncMock()) as send_mock:
+            bot.active_requests[33333] = {
+                "text": "🚨 Новая заявка (BotHelp)!\n👤 Имя: Дарья\n📞 Телефон: +79001112233",
+                "current_group_index": 0,
+                "groups": [-1001, -1002],
+                "timer": None,
+                "category": "computers",
+                "chat_id": -1001,
+                "tg_message_id": 555,
+                "transitioning": False,
+            }
+            upd1, q1, msg1 = self._make_query("accept_33333", chat_id=-1001, msg_id=555)
+            upd2, q2, msg2 = self._make_query("accept_33333", chat_id=-1001, msg_id=555)
+            upd3, q3, msg3 = self._make_query("reject_33333", chat_id=-1001, msg_id=555)
+
+            # Имитируем параллельное двойное нажатие "Принимаю" и одновременный "Не беру" на ту же карточку
+            await asyncio.gather(
+                bot.handle_callback(upd1, None),
+                bot.handle_callback(upd2, None),
+                bot.handle_callback(upd3, None),
+            )
+
+            q1.edit_message_text.assert_awaited_once()
+            pin_mock.assert_awaited_once_with(chat_id=-1001, message_id=555, disable_notification=True)
+            send_mock.assert_awaited_once()
+            msg1.delete.assert_not_awaited()
+            msg2.delete.assert_not_awaited()
+            msg3.delete.assert_not_awaited()
+            self.assertIn(33333, bot.accepted_requests)
+
+    async def test_accepted_text_guard_prevents_delete_even_after_restart(self):
+        # Даже если память бота сброшена после перезапуска, карточка с "✅ Заявку принял ..." не удаляется
+        upd_acc, q_acc, msg_acc = self._make_query(
+            "accept_44444",
+            msg_text="✅ Заявку принял @Danil_Tumen\n\n🚨 Новая заявка!",
+        )
+        upd_rej, q_rej, msg_rej = self._make_query(
+            "reject_44444",
+            msg_text="✅ Заявку принял @Danil_Tumen\n\n🚨 Новая заявка!",
+        )
+        await bot.handle_callback(upd_acc, None)
+        await bot.handle_callback(upd_rej, None)
+        msg_acc.delete.assert_not_awaited()
+        msg_rej.delete.assert_not_awaited()
 
 
 if __name__ == "__main__":
